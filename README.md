@@ -36,7 +36,7 @@ An abstraction value of `1` preserves the input resolution. Larger values reduce
 
 Install the JavaScript dependencies with `npm install`, then start the development server with `npm run dev`. Open the local URL printed by Vite, choose an image, and create a Notan or grayscale study. Use the previous/next buttons to browse the most recent 20 studies for the current image. This history is session-only until snapshots are saved.
 
-Choose **Save snapshot** to pick a parent folder. Watercolorist creates a subfolder named after the source image and saves the study as PNG alongside a JSON file containing its settings. Turn on **Ask to save each new study** to choose a destination folder and then confirm each newly created or revisited unsaved study. This folder-writing feature requires a browser with the File System Access API; the PNG download remains available as a fallback.
+Choose **Save snapshot** to pick a parent folder. Watercolorist creates a subfolder named after the source image and saves numbered PNG snapshots alongside JSON files containing their settings. Snapshot numbering checks the existing records, so branching from an earlier study does not reuse or remove numbers already saved. Turn on **Ask to save each new study** to choose a destination folder and then confirm each newly created or revisited unsaved study. This folder-writing feature requires a browser with the File System Access API; the PNG download remains available as a fallback.
 
 The Python transforms and image-aware abstraction estimate run in a Web Worker through Pyodide. The smart default samples image edges and suggests a scale from 2× to 12×; the artist can switch it off and adjust the slider manually. Each study records whether the estimate or a manual scale was used.
 

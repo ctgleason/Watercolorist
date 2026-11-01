@@ -17,6 +17,7 @@ type Study = {
   thresholdMethod: string;
   createdAt: Date;
   saved: boolean;
+  snapshotNumber?: number;
 };
 
 type SnapshotWritable = {
@@ -24,7 +25,12 @@ type SnapshotWritable = {
   close: () => Promise<void>;
 };
 
-type SnapshotFile = { createWritable: () => Promise<SnapshotWritable> };
+type SnapshotFile = {
+  createWritable: () => Promise<SnapshotWritable>;
+  getFile: () => Promise<File>;
+};
+
+type SnapshotEntry = SnapshotDirectory & SnapshotFile & { kind: "file" | "directory" };
 
 type SnapshotDirectory = {
   getDirectoryHandle: (
@@ -32,6 +38,7 @@ type SnapshotDirectory = {
     options: { create: boolean },
   ) => Promise<SnapshotDirectory>;
   getFileHandle: (name: string, options: { create: boolean }) => Promise<SnapshotFile>;
+  entries: () => AsyncIterableIterator<[string, SnapshotEntry]>;
 };
 
 type DirectoryPickerWindow = Window & {
@@ -288,6 +295,32 @@ const writeSnapshotFile = async (directory: SnapshotDirectory, name: string, dat
   await writable.close();
 };
 
+const nextSnapshotNumber = async (directory: SnapshotDirectory): Promise<number> => {
+  let snapshotCount = 0;
+  let highestRecordedNumber = 0;
+
+  for await (const [name, entry] of directory.entries()) {
+    if (entry.kind !== "file" || !name.endsWith(".json")) continue;
+    snapshotCount += 1;
+    try {
+      const metadata: unknown = JSON.parse(await (await entry.getFile()).text());
+      if (
+        typeof metadata === "object" &&
+        metadata !== null &&
+        "snapshotNumber" in metadata &&
+        typeof metadata.snapshotNumber === "number" &&
+        Number.isSafeInteger(metadata.snapshotNumber)
+      ) {
+        highestRecordedNumber = Math.max(highestRecordedNumber, metadata.snapshotNumber);
+      }
+    } catch {
+      // Count legacy or unreadable snapshot records so new numbers are not reused.
+    }
+  }
+
+  return Math.max(snapshotCount, highestRecordedNumber) + 1;
+};
+
 const saveStudySnapshot = async (study: Study) => {
   if (!selectedFile) return;
   const picker = window as DirectoryPickerWindow;
@@ -309,11 +342,14 @@ const saveStudySnapshot = async (study: Study) => {
 
   const folderName = getSnapshotFolderName(selectedFile.name);
   const paintingFolder = await snapshotRoot.getDirectoryHandle(folderName, { create: true });
+  const snapshotNumber = await nextSnapshotNumber(paintingFolder);
   const timestamp = study.createdAt.toISOString().replace(/[:.]/g, "-");
   const transformName = study.transform;
-  const imageName = `${transformName}-${timestamp}.png`;
-  const metadataName = `${transformName}-${timestamp}.json`;
+  const sequence = String(snapshotNumber).padStart(4, "0");
+  const imageName = `snapshot-${sequence}-${transformName}-${timestamp}.png`;
+  const metadataName = `snapshot-${sequence}-${transformName}-${timestamp}.json`;
   const metadata = {
+    snapshotNumber,
     sourceImage: selectedFile.name,
     transform: study.transform,
     abstraction: study.abstraction,
@@ -326,7 +362,8 @@ const saveStudySnapshot = async (study: Study) => {
   await writeSnapshotFile(paintingFolder, imageName, study.blob);
   await writeSnapshotFile(paintingFolder, metadataName, JSON.stringify(metadata, null, 2));
   study.saved = true;
-  setStatus(`Snapshot saved in ${folderName}/${imageName}.`, "success");
+  study.snapshotNumber = snapshotNumber;
+  setStatus(`Snapshot #${snapshotNumber} saved in ${folderName}/${imageName}.`, "success");
 };
 
 const offerSnapshotSave = async (study: Study) => {
@@ -502,7 +539,11 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     createdAt: new Date(),
     saved: false,
   };
-  for (const removed of studyHistory.splice(studyIndex + 1)) URL.revokeObjectURL(removed.url);
+  const futureStudies = studyHistory.splice(studyIndex + 1);
+  for (const retainedStudy of futureStudies) {
+    if (retainedStudy.saved) studyHistory.push(retainedStudy);
+    else URL.revokeObjectURL(retainedStudy.url);
+  }
   studyHistory.push(study);
   if (studyHistory.length > MAX_STUDY_HISTORY) {
     const removed = studyHistory.shift();
