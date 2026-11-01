@@ -8,8 +8,11 @@ type TransformRequest = {
   thresholdMethod: string;
 };
 
+type EstimateRequest = { type: "estimate"; id: number; image: ArrayBuffer };
+
 type WorkerRequest =
   | { type: "initialize"; modules: Record<string, string> }
+  | EstimateRequest
   | TransformRequest;
 
 type WorkerResponse =
@@ -19,6 +22,7 @@ type WorkerResponse =
       runtimeLoadMs: number;
       packageLoadMs: number;
     }
+  | { type: "estimate"; id: number; abstraction: number }
   | { type: "complete"; id: number; image: ArrayBuffer; transformMs: number }
   | { type: "error"; id?: number; message: string };
 
@@ -89,8 +93,19 @@ workerContext.addEventListener("message", async ({ data }) => {
     }
     await initialization;
 
+    const inputPath = `/watercolorist-input-${data.id}`;
+    pyodide.FS.writeFile(inputPath, new Uint8Array(data.image));
+
+    if (data.type === "estimate") {
+      await pyodide.runPythonAsync("from PIL import Image\nfrom watercolorist.defaults import estimate_abstraction");
+      const abstraction = pyodide.runPython(
+        `estimate_abstraction(Image.open(${JSON.stringify(inputPath)}).convert("RGB"))`,
+      ) as number;
+      workerContext.postMessage({ type: "estimate", id: data.id, abstraction });
+      return;
+    }
+
     const startedAt = performance.now();
-    pyodide.FS.writeFile("/watercolorist-input", new Uint8Array(data.image));
     pyodide.globals.set("_watercolorist_transform", data.transform);
     pyodide.globals.set("_watercolorist_abstraction", data.abstraction);
     pyodide.globals.set("_watercolorist_levels", data.levels);
@@ -100,7 +115,7 @@ workerContext.addEventListener("message", async ({ data }) => {
 from PIL import Image
 from watercolorist.transforms import grayscale_study, notan_study
 
-_source = Image.open("/watercolorist-input").convert("RGB")
+_source = Image.open(${JSON.stringify(inputPath)}).convert("RGB")
 if _watercolorist_transform == "notan":
     _study = notan_study(
         _source,
@@ -132,7 +147,7 @@ _study.save("/watercolorist-output.png", format="PNG")
     const message = error instanceof Error ? error.message : String(error);
     workerContext.postMessage({
       type: "error",
-      id: data.type === "transform" ? data.id : undefined,
+      id: data.type === "initialize" ? undefined : data.id,
       message,
     });
   }

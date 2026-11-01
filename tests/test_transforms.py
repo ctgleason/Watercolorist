@@ -3,6 +3,7 @@ import pytest
 from PIL import Image
 
 from watercolorist.abstraction import abstract_image
+from watercolorist.defaults import estimate_abstraction
 from watercolorist.transforms import grayscale_study, notan_study
 
 
@@ -18,6 +19,16 @@ def test_abstraction_preserves_dimensions_and_rgb_mode() -> None:
 def test_abstraction_rejects_scales_below_one() -> None:
     with pytest.raises(ValueError, match="scale"):
         abstract_image(Image.new("RGB", (8, 8)), scale=0.5)
+
+
+def test_smart_abstraction_prefers_broader_scale_for_flat_image() -> None:
+    flat = Image.new("RGB", (48, 48), "white")
+    detailed = Image.fromarray(
+        ((np.indices((48, 48)).sum(axis=0) % 2) * 255).astype(np.uint8)[:, :, None].repeat(3, axis=2)
+    )
+
+    assert 2 <= estimate_abstraction(flat) <= 12
+    assert estimate_abstraction(flat) > estimate_abstraction(detailed)
 
 
 def test_grayscale_study_uses_requested_number_of_values() -> None:

@@ -1,4 +1,5 @@
 import abstractionSource from "../../src/watercolorist/abstraction.py?raw";
+import defaultsSource from "../../src/watercolorist/defaults.py?raw";
 import initSource from "../../src/watercolorist/__init__.py?raw";
 import imagesSource from "../../src/watercolorist/images.py?raw";
 import transformsSource from "../../src/watercolorist/transforms.py?raw";
@@ -11,6 +12,7 @@ type Study = {
   url: string;
   transform: TransformName;
   abstraction: number;
+  autoAbstraction: boolean;
   levels: number;
   thresholdMethod: string;
   createdAt: Date;
@@ -43,6 +45,7 @@ type WorkerReply =
       runtimeLoadMs: number;
       packageLoadMs: number;
     }
+  | { type: "estimate"; id: number; abstraction: number }
   | { type: "complete"; id: number; image: ArrayBuffer; transformMs: number }
   | { type: "error"; id?: number; message: string };
 
@@ -123,6 +126,7 @@ app.innerHTML = `
             <div class="setting-line"><label for="abstraction">Abstraction scale</label><output id="abstraction-output" for="abstraction">1×</output></div>
             <input id="abstraction" type="range" min="1" max="24" step="1" value="1" />
             <div class="range-ends"><span>Fine</span><span>Broad shapes</span></div>
+            <label class="auto-abstraction-option"><input id="auto-abstraction" type="checkbox" checked /><span>Use image-aware default</span></label>
           </div>
 
           <label class="save-prompt-option"><input id="prompt-save" type="checkbox" /><span>Ask to save each new study</span></label>
@@ -147,6 +151,7 @@ const worker = new Worker(new URL("./pyodide.worker.ts", import.meta.url), { typ
 const modules = {
   "__init__.py": initSource,
   "abstraction.py": abstractionSource,
+  "defaults.py": defaultsSource,
   "images.py": imagesSource,
   "transforms.py": transformsSource,
 };
@@ -177,6 +182,7 @@ const levelsSetting = get<HTMLDivElement>("#levels-setting");
 const thresholdSelect = get<HTMLSelectElement>("#threshold-method");
 const abstractionSlider = get<HTMLInputElement>("#abstraction");
 const abstractionOutput = get<HTMLOutputElement>("#abstraction-output");
+const autoAbstractionCheckbox = get<HTMLInputElement>("#auto-abstraction");
 const levelsSlider = get<HTMLInputElement>("#levels");
 const levelsOutput = get<HTMLOutputElement>("#levels-output");
 
@@ -185,6 +191,8 @@ let selectedFile: File | undefined;
 let sourceUrl: string | undefined;
 let pendingRequest: number | undefined;
 let nextRequestId = 1;
+let pendingEstimateId: number | undefined;
+let autoAbstractionScale: number | undefined;
 const MAX_STUDY_HISTORY = 20;
 let studyHistory: Study[] = [];
 let studyIndex = -1;
@@ -211,11 +219,23 @@ const updateSettings = () => {
 };
 
 const updateRunButton = () => {
-  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined;
+  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined || pendingEstimateId !== undefined;
   if (pendingRequest !== undefined) runLabel.textContent = "Painting the values…";
+  else if (pendingEstimateId !== undefined) runLabel.textContent = "Reading image detail…";
   else if (!runtimeReady) runLabel.textContent = "Preparing Python…";
   else if (!selectedFile) runLabel.textContent = "Choose an image first";
   else runLabel.textContent = "Create study";
+};
+
+const requestAbstractionEstimate = async () => {
+  const file = selectedFile;
+  if (!file || !runtimeReady || !autoAbstractionCheckbox.checked || pendingEstimateId !== undefined) return;
+  const id = nextRequestId++;
+  pendingEstimateId = id;
+  updateRunButton();
+  const image = await file.arrayBuffer();
+  if (selectedFile !== file || pendingEstimateId !== id) return;
+  worker.postMessage({ type: "estimate", id, image }, [image]);
 };
 
 const setSelectedFile = (file: File) => {
@@ -229,6 +249,10 @@ const setSelectedFile = (file: File) => {
   studyIndex = -1;
   snapshotRoot = undefined;
   promptSaveCheckbox.checked = false;
+  autoAbstractionCheckbox.checked = true;
+  autoAbstractionScale = undefined;
+  pendingEstimateId = undefined;
+  abstractionOutput.value = "Auto";
   if (sourceUrl) URL.revokeObjectURL(sourceUrl);
   sourceUrl = URL.createObjectURL(file);
   sourcePreview.src = sourceUrl;
@@ -239,9 +263,10 @@ const setSelectedFile = (file: File) => {
   resultPreview.hidden = true;
   resultEmpty.hidden = false;
   downloadLink.hidden = true;
-  setStatus("Image ready. Choose settings and create a study.");
+  setStatus(runtimeReady ? "Estimating a starting abstraction scale…" : "Image ready. Choose settings and create a study.");
   updateHistoryControls();
   updateRunButton();
+  void requestAbstractionEstimate();
 };
 
 const updateHistoryControls = () => {
@@ -292,6 +317,7 @@ const saveStudySnapshot = async (study: Study) => {
     sourceImage: selectedFile.name,
     transform: study.transform,
     abstraction: study.abstraction,
+    autoAbstraction: study.autoAbstraction,
     ...(study.transform === "grayscale" ? { levels: study.levels } : { thresholdMethod: study.thresholdMethod }),
     createdAt: study.createdAt.toISOString(),
     image: imageName,
@@ -320,7 +346,8 @@ const showStudy = async (index: number) => {
   const study = studyHistory[studyIndex];
   get<HTMLInputElement>(`input[name="transform"][value="${study.transform}"]`).checked = true;
   abstractionSlider.value = String(study.abstraction);
-  abstractionOutput.value = `${study.abstraction}×`;
+  autoAbstractionCheckbox.checked = study.autoAbstraction;
+  abstractionOutput.value = study.autoAbstraction ? `Auto · ${study.abstraction}×` : `${study.abstraction}×`;
   levelsSlider.value = String(study.levels);
   levelsOutput.value = String(study.levels);
   thresholdSelect.value = study.thresholdMethod;
@@ -363,10 +390,24 @@ for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="tra
 }
 
 abstractionSlider.addEventListener("input", () => {
+  autoAbstractionCheckbox.checked = false;
   abstractionOutput.value = `${abstractionSlider.value}×`;
 });
 levelsSlider.addEventListener("input", () => {
   levelsOutput.value = levelsSlider.value;
+});
+
+autoAbstractionCheckbox.addEventListener("change", () => {
+  if (!autoAbstractionCheckbox.checked) {
+    abstractionOutput.value = `${abstractionSlider.value}×`;
+    return;
+  }
+  if (autoAbstractionScale !== undefined) {
+    abstractionSlider.value = String(autoAbstractionScale);
+    abstractionOutput.value = `Auto · ${autoAbstractionScale}×`;
+    return;
+  }
+  void requestAbstractionEstimate();
 });
 
 historyBack.addEventListener("click", () => {
@@ -412,10 +453,30 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     setStatus(`Runtime ${message.runtimeLoadMs} ms · image packages ${message.packageLoadMs} ms`, "success");
     performanceNote.textContent = `Runtime ${message.runtimeLoadMs} ms · packages ${message.packageLoadMs} ms`;
     updateRunButton();
+    void requestAbstractionEstimate();
+    return;
+  }
+
+  if (message.type === "estimate") {
+    if (message.id !== pendingEstimateId) return;
+    pendingEstimateId = undefined;
+    autoAbstractionScale = message.abstraction;
+    if (autoAbstractionCheckbox.checked) {
+      abstractionSlider.value = String(message.abstraction);
+      abstractionOutput.value = `Auto · ${message.abstraction}×`;
+      setStatus(`Suggested abstraction: ${message.abstraction}× · adjust if desired.`, "success");
+    }
+    updateRunButton();
     return;
   }
 
   if (message.type === "error") {
+    if (message.id !== undefined && message.id === pendingEstimateId) {
+      pendingEstimateId = undefined;
+      setStatus(`Could not estimate image detail: ${message.message}`, "error");
+      updateRunButton();
+      return;
+    }
     if (message.id !== undefined && message.id !== pendingRequest) return;
     pendingRequest = undefined;
     if (message.id === undefined) {
@@ -435,6 +496,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     url: URL.createObjectURL(blob),
     transform: selectedTransform(),
     abstraction: Number(abstractionSlider.value),
+    autoAbstraction: autoAbstractionCheckbox.checked,
     levels: Number(levelsSlider.value),
     thresholdMethod: thresholdSelect.value,
     createdAt: new Date(),

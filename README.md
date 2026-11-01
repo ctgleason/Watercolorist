@@ -38,7 +38,11 @@ Install the JavaScript dependencies with `npm install`, then start the developme
 
 Choose **Save snapshot** to pick a parent folder. Watercolorist creates a subfolder named after the source image and saves the study as PNG alongside a JSON file containing its settings. Turn on **Ask to save each new study** to choose a destination folder and then confirm each newly created or revisited unsaved study. This folder-writing feature requires a browser with the File System Access API; the PNG download remains available as a fallback.
 
-The Python transforms run in a Web Worker through Pyodide; the browser downloads the Python runtime and NumPy/Pillow packages from the Pyodide CDN on first use. This prototype requires network access for that first load and does not yet include offline/PWA caching.
+The Python transforms and image-aware abstraction estimate run in a Web Worker through Pyodide. The smart default samples image edges and suggests a scale from 2× to 12×; the artist can switch it off and adjust the slider manually. Each study records whether the estimate or a manual scale was used.
+
+The browser downloads the Python runtime and NumPy/Pillow packages from the Pyodide CDN on first use. The installable PWA precaches its app shell and stores those runtime/package downloads for repeat and offline launches. Offline use becomes available after a successful online visit and the initial downloads; browser storage can be cleared or evicted. In a supported browser, use its **Install app** or **Add to Dock** action to install Watercolorist.
+
+The PWA icon files are generated from `web/public/watercolorist.svg` with `npm run generate:icons`.
 
 ## Architecture direction
 
@@ -48,8 +52,8 @@ The proposed product is a Progressive Web App with a thin TypeScript/JavaScript 
 
 1. Python image core and transform tests (complete for the initial slice).
 2. Pyodide worker proof of concept and browser processing (feasibility validated).
-3. Make the browser shell installable and offline-capable; refine smart abstraction defaults.
-4. Editable transform versions, local persistence, and region masks.
+3. Installable PWA, offline runtime caching, and an initial image-aware abstraction default (current milestone).
+4. Persistent project/version storage and region masks.
 5. Color abstraction, harmony tools, and palette management.
 6. Watercolor pigment-mixing suggestions and measured swatch refinement.
 7. Accessibility, mobile, and performance polish.

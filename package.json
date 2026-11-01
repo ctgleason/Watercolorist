@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "generate:icons": "pwa-assets-generator --preset minimal-2023 web/public/watercolorist.svg"
   },
   "devDependencies": {
+    "@vite-pwa/assets-generator": "^2.0.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "vite-plugin-pwa": "^2.0.0"
   }
 }
