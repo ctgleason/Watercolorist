@@ -44,6 +44,12 @@ The browser downloads the Python runtime and NumPy/Pillow packages from the Pyod
 
 The PWA icon files are generated from `web/public/watercolorist.svg` with `npm run generate:icons`.
 
+## Deploy to GitHub Pages
+
+The production build is configured for the `ctgleason.github.io/Watercolorist/` project-site path. The workflow at `.github/workflows/deploy-pages.yml` builds and deploys `dist/` whenever `main` is updated. In the repository's **Settings → Pages**, select **GitHub Actions** as the build source. After the first successful workflow, the site is available at `https://ctgleason.github.io/Watercolorist/`.
+
+The GitHub repository is private, but the Pages website is public. Uploaded reference images are processed in the browser and are not sent to GitHub Pages.
+
 ## Architecture direction
 
 The proposed product is a Progressive Web App with a thin TypeScript/JavaScript interface and a Python image-processing core. The first implementation milestone deliberately focuses on the core algorithms. Before committing to browser-side Python, a small Pyodide prototype should verify package compatibility, startup cost, offline behavior, and performance on representative images. If those constraints are not acceptable, the same core can be exposed through a Python service instead.

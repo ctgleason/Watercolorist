@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   root: "web",
+  base: command === "build" ? "/Watercolorist/" : "/",
   plugins: [
     VitePWA({
       registerType: "autoUpdate",
@@ -18,27 +19,27 @@ export default defineConfig({
         theme_color: "#f6f4ee",
         background_color: "#f6f4ee",
         display: "standalone",
-        scope: "/",
-        start_url: "/",
+        scope: "./",
+        start_url: "./",
         icons: [
           {
-            src: "/pwa-64x64.png",
+            src: "pwa-64x64.png",
             sizes: "64x64",
             type: "image/png",
           },
           {
-            src: "/pwa-192x192.png",
+            src: "pwa-192x192.png",
             sizes: "192x192",
             type: "image/png",
           },
           {
-            src: "/pwa-512x512.png",
+            src: "pwa-512x512.png",
             sizes: "512x512",
             type: "image/png",
             purpose: "any",
           },
           {
-            src: "/maskable-icon-512x512.png",
+            src: "maskable-icon-512x512.png",
             sizes: "512x512",
             type: "image/png",
             purpose: "maskable",
@@ -68,4 +69,4 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
   },
-});
+}));
