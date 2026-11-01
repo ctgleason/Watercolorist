@@ -6,13 +6,32 @@ type TransformRequest = {
   abstraction: number;
   levels: number;
   thresholdMethod: string;
+  exposure: number;
+  shadows: number;
+  highlights: number;
+  workingResolution: number;
 };
 
-type EstimateRequest = { type: "estimate"; id: number; image: ArrayBuffer };
+type EstimateRequest = {
+  type: "estimate";
+  id: number;
+  image: ArrayBuffer;
+  workingResolution: number;
+};
+
+type TonePreviewRequest = {
+  type: "tone-preview";
+  id: number;
+  image: ArrayBuffer;
+  exposure: number;
+  shadows: number;
+  highlights: number;
+};
 
 type WorkerRequest =
   | { type: "initialize"; modules: Record<string, string> }
   | EstimateRequest
+  | TonePreviewRequest
   | TransformRequest;
 
 type WorkerResponse =
@@ -23,6 +42,7 @@ type WorkerResponse =
       packageLoadMs: number;
     }
   | { type: "estimate"; id: number; abstraction: number }
+  | { type: "tone-preview"; id: number; image: ArrayBuffer }
   | { type: "complete"; id: number; image: ArrayBuffer; transformMs: number }
   | { type: "error"; id?: number; message: string };
 
@@ -39,6 +59,7 @@ const pyodideIndexUrl = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/";
 type PyodideRuntime = {
   FS: {
     mkdir: (path: string) => void;
+    unlink: (path: string) => void;
     writeFile: (path: string, data: string | Uint8Array) => void;
     readFile: (path: string) => Uint8Array;
   };
@@ -51,6 +72,7 @@ type PyodideLoader = (options: { indexURL: string }) => Promise<PyodideRuntime>;
 
 let pyodide: PyodideRuntime | undefined;
 let initialization: Promise<void> | undefined;
+let messageQueue = Promise.resolve();
 
 const initialize = async (modules: Record<string, string>) => {
   const runtimeStartedAt = performance.now();
@@ -80,7 +102,8 @@ const initialize = async (modules: Record<string, string>) => {
   });
 };
 
-workerContext.addEventListener("message", async ({ data }) => {
+const handleMessage = async (data: WorkerRequest) => {
+  const cleanupPaths: string[] = [];
   try {
     if (data.type === "initialize") {
       initialization ??= initialize(data.modules);
@@ -95,22 +118,61 @@ workerContext.addEventListener("message", async ({ data }) => {
 
     const inputPath = `/watercolorist-input-${data.id}`;
     pyodide.FS.writeFile(inputPath, new Uint8Array(data.image));
+    cleanupPaths.push(inputPath);
 
     if (data.type === "estimate") {
       await pyodide.runPythonAsync("from PIL import Image\nfrom watercolorist.defaults import estimate_abstraction");
+      pyodide.globals.set("_watercolorist_working_resolution", data.workingResolution);
       const abstraction = pyodide.runPython(
-        `estimate_abstraction(Image.open(${JSON.stringify(inputPath)}).convert("RGB"))`,
+        `estimate_abstraction(Image.open(${JSON.stringify(inputPath)}).convert("RGB"), working_resolution=_watercolorist_working_resolution)`,
       ) as number;
+      pyodide.FS.unlink(inputPath);
       workerContext.postMessage({ type: "estimate", id: data.id, abstraction });
       return;
     }
 
     const startedAt = performance.now();
+    if (data.type === "tone-preview") {
+      pyodide.globals.set("_watercolorist_exposure", data.exposure);
+      pyodide.globals.set("_watercolorist_shadows", data.shadows);
+      pyodide.globals.set("_watercolorist_highlights", data.highlights);
+      const outputPath = `/watercolorist-output-${data.id}.png`;
+      cleanupPaths.push(outputPath);
+      await pyodide.runPythonAsync(`
+from PIL import Image
+from watercolorist.transforms import adjust_tone
+
+_preview = adjust_tone(
+    Image.open(${JSON.stringify(inputPath)}).convert("RGB"),
+    exposure=_watercolorist_exposure,
+    shadows=_watercolorist_shadows,
+    highlights=_watercolorist_highlights,
+)
+_preview.save(${JSON.stringify(outputPath)}, format="PNG")
+`);
+  const previewOutput = pyodide.FS.readFile(outputPath);
+      const previewImage = new ArrayBuffer(previewOutput.byteLength);
+      new Uint8Array(previewImage).set(previewOutput);
+  pyodide.FS.unlink(outputPath);
+  pyodide.FS.unlink(inputPath);
+      workerContext.postMessage(
+        { type: "tone-preview", id: data.id, image: previewImage },
+        [previewImage],
+      );
+      return;
+    }
+
     pyodide.globals.set("_watercolorist_transform", data.transform);
     pyodide.globals.set("_watercolorist_abstraction", data.abstraction);
     pyodide.globals.set("_watercolorist_levels", data.levels);
     pyodide.globals.set("_watercolorist_threshold_method", data.thresholdMethod);
+    pyodide.globals.set("_watercolorist_exposure", data.exposure);
+    pyodide.globals.set("_watercolorist_shadows", data.shadows);
+    pyodide.globals.set("_watercolorist_highlights", data.highlights);
+    pyodide.globals.set("_watercolorist_working_resolution", data.workingResolution);
 
+    const outputPath = `/watercolorist-output-${data.id}.png`;
+    cleanupPaths.push(outputPath);
     await pyodide.runPythonAsync(`
 from PIL import Image
 from watercolorist.transforms import grayscale_study, notan_study
@@ -121,19 +183,29 @@ if _watercolorist_transform == "notan":
         _source,
         threshold_method=_watercolorist_threshold_method,
         abstraction=_watercolorist_abstraction,
+        exposure=_watercolorist_exposure,
+        shadows=_watercolorist_shadows,
+        highlights=_watercolorist_highlights,
+        working_resolution=_watercolorist_working_resolution,
     )
 else:
     _study = grayscale_study(
         _source,
         levels=_watercolorist_levels,
         abstraction=_watercolorist_abstraction,
+        exposure=_watercolorist_exposure,
+        shadows=_watercolorist_shadows,
+        highlights=_watercolorist_highlights,
+        working_resolution=_watercolorist_working_resolution,
     )
-_study.save("/watercolorist-output.png", format="PNG")
+_study.save(${JSON.stringify(outputPath)}, format="PNG")
 `);
 
-    const output = pyodide.FS.readFile("/watercolorist-output.png");
+  const output = pyodide.FS.readFile(outputPath);
     const image = new ArrayBuffer(output.byteLength);
     new Uint8Array(image).set(output);
+    pyodide.FS.unlink(outputPath);
+    pyodide.FS.unlink(inputPath);
     workerContext.postMessage(
       {
         type: "complete",
@@ -145,10 +217,23 @@ _study.save("/watercolorist-output.png", format="PNG")
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (pyodide) {
+      for (const path of cleanupPaths) {
+        try {
+          pyodide.FS.unlink(path);
+        } catch {
+          // Ignore paths already removed before a later step failed.
+        }
+      }
+    }
     workerContext.postMessage({
       type: "error",
       id: data.type === "initialize" ? undefined : data.id,
       message,
     });
   }
+};
+
+workerContext.addEventListener("message", ({ data }) => {
+  messageQueue = messageQueue.then(() => handleMessage(data));
 });

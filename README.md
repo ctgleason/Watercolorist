@@ -40,6 +40,10 @@ Choose **Save snapshot** to pick a parent folder. Watercolorist creates a subfol
 
 The Python transforms and image-aware abstraction estimate run in a Web Worker through Pyodide. The smart default samples image edges and suggests a scale from 2× to 12×; the artist can switch it off and adjust the slider manually. Each study records whether the estimate or a manual scale was used.
 
+Tone controls are grouped in a collapsed **Tone adjustments** panel to keep the settings card uncluttered. Exposure uses EV stops; Shadows and Highlights apply soft tonal-range adjustments. All controls start neutral, can be reset together, and their settings are stored with each study/snapshot. They currently affect the whole image; the Python adjustment function is separated so the same operation can later be blended through a region mask.
+
+**Working resolution** can be set to 100%, 75%, 50%, or 25% of the source dimensions. Reducing the percentage reduces processed pixels in both dimensions (so 50% is one quarter of the pixels). Studies are enlarged back to the source dimensions with nearest-neighbor resampling to preserve discrete value areas. The selected scale is saved with each study and applied to the live tone-preview proxy; 100% retains the original processing behavior.
+
 The browser downloads the Python runtime and NumPy/Pillow packages from the Pyodide CDN on first use. The installable PWA precaches its app shell and stores those runtime/package downloads for repeat and offline launches. Offline use becomes available after a successful online visit and the initial downloads; browser storage can be cleared or evicted. In a supported browser, use its **Install app** or **Add to Dock** action to install Watercolorist.
 
 The PWA icon files are generated from `web/public/watercolorist.svg` with `npm run generate:icons`.
