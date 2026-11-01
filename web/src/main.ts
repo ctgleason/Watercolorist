@@ -540,11 +540,8 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     createdAt: new Date(),
     saved: false,
   };
-  const futureStudies = studyHistory.splice(studyIndex + 1);
-  for (const retainedStudy of futureStudies) {
-    if (retainedStudy.saved) studyHistory.push(retainedStudy);
-    else URL.revokeObjectURL(retainedStudy.url);
-  }
+  // History is an append-only sequence for the current image. Creating a
+  // study while viewing an older one must not discard later studies.
   studyHistory.push(study);
   if (studyHistory.length > MAX_STUDY_HISTORY) {
     const removed = studyHistory.shift();

@@ -34,7 +34,7 @@ An abstraction value of `1` preserves the input resolution. Larger values reduce
 
 ## Browser feasibility prototype
 
-Install the JavaScript dependencies with `npm install`, then start the development server with `npm run dev`. Open the local URL printed by Vite, choose an image, and create a Notan or grayscale study. Use the previous/next buttons to browse the most recent 20 studies for the current image. This history is session-only until snapshots are saved.
+Install the JavaScript dependencies with `npm install`, then start the development server with `npm run dev`. Open the local URL printed by Vite, choose an image, and create a Notan or grayscale study. Use the previous/next buttons to browse the most recent 20 studies for the current image. Creating a study while viewing an earlier one appends it without removing later studies. This history is session-only until snapshots are saved.
 
 Choose **Save snapshot** to pick a parent folder. Watercolorist creates a subfolder named after the source image and saves numbered PNG snapshots alongside JSON files containing their settings. Snapshot numbering checks the existing records, so branching from an earlier study does not reuse or remove numbers already saved. Turn on **Ask to save each new study** to choose a destination folder and then confirm each newly created or revisited unsaved study. This folder-writing feature requires a browser with the File System Access API; the PNG download remains available as a fallback.
 
