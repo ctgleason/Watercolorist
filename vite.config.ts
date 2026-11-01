@@ -1,7 +1,18 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
+const packageMetadata = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+  version: string;
+};
+const appCommit = process.env.GITHUB_SHA?.slice(0, 7) ?? execFileSync("git", ["rev-parse", "--short=7", "HEAD"], { encoding: "utf8" }).trim();
+
 export default defineConfig(({ command }) => ({
+  define: {
+    __APP_VERSION__: JSON.stringify(packageMetadata.version),
+    __APP_COMMIT__: JSON.stringify(appCommit),
+  },
   root: "web",
   base: command === "build" ? "/Watercolorist/" : "/",
   plugins: [
