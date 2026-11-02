@@ -3,13 +3,19 @@
 from typing import Literal
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 from watercolorist.abstraction import abstract_image
 from watercolorist.images import load_rgb
 
 ThresholdMethod = Literal["otsu", "median"]
-GrayscaleMethod = Literal["even", "histogram", "coherent-regions", "adaptive-regions"]
+GrayscaleMethod = Literal[
+    "even",
+    "histogram",
+    "edge-guided",
+    "coherent-regions",
+    "adaptive-regions",
+]
 
 
 def _working_image(image: Image.Image, working_resolution: float) -> tuple[Image.Image, tuple[int, int]]:
@@ -119,9 +125,23 @@ def _quantize_values(values: np.ndarray, levels: int) -> np.ndarray:
 
 def _histogram_quantize_values(values: np.ndarray, levels: int) -> np.ndarray:
     """Map luminance values through equal-population bins from their histogram."""
+    return _histogram_quantize_with_brightness_weight(values, levels, 0.0)
+
+
+def _histogram_quantize_with_brightness_weight(
+    values: np.ndarray,
+    levels: int,
+    brightness_weight: float,
+) -> np.ndarray:
+    """Map by histogram rank, optionally giving brighter pixels more histogram weight."""
     if not 2 <= levels <= 256:
         raise ValueError("levels must be between 2 and 256")
-    histogram = np.bincount(values.ravel(), minlength=256).astype(np.float64)
+    if not 0.0 <= brightness_weight <= 4.0:
+        raise ValueError("brightness_weight must be between 0 and 4")
+    flat_values = values.ravel()
+    normalized_luminance = flat_values.astype(np.float64) / 255.0
+    pixel_weights = 1.0 + brightness_weight * normalized_luminance**2
+    histogram = np.bincount(flat_values, weights=pixel_weights, minlength=256)
     total = histogram.sum()
     if total == 0:
         return values.copy()
@@ -256,6 +276,108 @@ def _adaptive_region_grayscale(
     )
 
 
+def _edge_guided_grayscale(
+    image: Image.Image,
+    levels: int,
+    abstraction: float,
+) -> tuple[Image.Image, np.ndarray, np.ndarray]:
+    """Use persistent luminance edges to preserve flat regions; histogram-map texture."""
+    if not 2 <= levels <= 256:
+        raise ValueError("levels must be between 2 and 256")
+
+    rgb_image = load_rgb(image)
+    analysis = rgb_image.copy()
+    analysis.thumbnail((768, 768), Image.Resampling.BOX)
+    gray_image = ImageOps.grayscale(analysis)
+    luminance = np.asarray(gray_image, dtype=np.uint8)
+    smoothed = np.asarray(
+        gray_image.filter(ImageFilter.GaussianBlur(radius=2.0)),
+        dtype=np.float32,
+    )
+    gradient_y = np.gradient(smoothed, axis=0) if smoothed.shape[0] > 1 else np.zeros_like(smoothed)
+    gradient_x = np.gradient(smoothed, axis=1) if smoothed.shape[1] > 1 else np.zeros_like(smoothed)
+    gradient = np.hypot(gradient_y, gradient_x)
+
+    target_regions = max(48, min(400, round(1200 / max(1.0, abstraction**0.5))))
+    spacing = max(2, round(np.sqrt(smoothed.size / target_regions)))
+    slic_labels = _slic_region_labels(np.asarray(analysis, dtype=np.uint8), spacing)
+    region_count = int(slic_labels.max()) + 1
+
+    horizontal_left = slic_labels[:, :-1]
+    horizontal_right = slic_labels[:, 1:]
+    vertical_top = slic_labels[:-1, :]
+    vertical_bottom = slic_labels[1:, :]
+    horizontal_mask = horizontal_left != horizontal_right
+    vertical_mask = vertical_top != vertical_bottom
+    pair_ids = np.concatenate((
+        np.minimum(horizontal_left[horizontal_mask], horizontal_right[horizontal_mask]) * region_count
+        + np.maximum(horizontal_left[horizontal_mask], horizontal_right[horizontal_mask]),
+        np.minimum(vertical_top[vertical_mask], vertical_bottom[vertical_mask]) * region_count
+        + np.maximum(vertical_top[vertical_mask], vertical_bottom[vertical_mask]),
+    ))
+    pair_strengths = np.concatenate((
+        (gradient[:, :-1][horizontal_mask] + gradient[:, 1:][horizontal_mask]) / 2.0,
+        (gradient[:-1, :][vertical_mask] + gradient[1:, :][vertical_mask]) / 2.0,
+    ))
+
+    parents = np.arange(region_count, dtype=np.int32)
+
+    def find(label: int) -> int:
+        root = label
+        while parents[root] != root:
+            root = int(parents[root])
+        while parents[label] != label:
+            next_label = int(parents[label])
+            parents[label] = root
+            label = next_label
+        return root
+
+    if pair_ids.size:
+        unique_pairs, inverse = np.unique(pair_ids, return_inverse=True)
+        boundary_counts = np.bincount(inverse)
+        boundary_strength = np.bincount(inverse, weights=pair_strengths) / boundary_counts
+        separator_threshold = max(5.0, float(np.percentile(boundary_strength, 72)))
+        for pair_id, strength in zip(unique_pairs, boundary_strength, strict=True):
+            if strength > separator_threshold:
+                continue
+            left = int(pair_id // region_count)
+            right = int(pair_id % region_count)
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+    root_ids = np.fromiter((find(region_id) for region_id in range(region_count)), dtype=np.int32)
+    _, merged_ids = np.unique(root_ids, return_inverse=True)
+    merged_labels = merged_ids[slic_labels]
+    merged_count = int(merged_labels.max()) + 1
+    flat_labels = merged_labels.ravel()
+    counts = np.bincount(flat_labels, minlength=merged_count).astype(np.float64)
+    means = np.bincount(
+        flat_labels,
+        weights=luminance.ravel().astype(np.float64),
+        minlength=merged_count,
+    ) / np.maximum(counts, 1.0)
+    variances = np.bincount(
+        flat_labels,
+        weights=(luminance.ravel().astype(np.float64) - means[flat_labels]) ** 2,
+        minlength=merged_count,
+    ) / np.maximum(counts, 1.0)
+
+    pixel_values = _histogram_quantize_with_brightness_weight(luminance, levels, 4.0)
+    mean_values = _histogram_quantize_with_brightness_weight(
+        np.rint(means).astype(np.uint8), levels, 4.0
+    )
+    mapped = pixel_values.copy()
+    flat_mapped = mapped.ravel()
+    flat_variances = variances[flat_labels]
+    flat_mean_values = mean_values[flat_labels]
+    flat_mapped[flat_variances <= 18.0**2] = flat_mean_values[flat_variances <= 18.0**2]
+    result = Image.fromarray(mapped, mode="L").resize(rgb_image.size, Image.Resampling.NEAREST)
+    output_labels, output_values = _region_map_for_grayscale(result)
+    return result, output_labels, output_values
+
+
 def _connected_value_regions(source_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Label 4-connected components of equal integer values."""
     if source_values.ndim != 2 or source_values.dtype.kind not in "ui":
@@ -320,13 +442,21 @@ def _grayscale_study(
     working_resolution: float,
     grayscale_method: GrayscaleMethod,
 ) -> tuple[Image.Image, np.ndarray | None, np.ndarray | None]:
-    if grayscale_method not in ("even", "histogram", "coherent-regions", "adaptive-regions"):
-        raise ValueError("grayscale_method must be 'even', 'histogram', or 'coherent-regions'")
+    if grayscale_method not in (
+        "even", "histogram", "edge-guided", "coherent-regions", "adaptive-regions"
+    ):
+        raise ValueError(
+            "grayscale_method must be 'even', 'histogram', 'edge-guided', or 'coherent-regions'"
+        )
     source, original_size = _working_image(image, working_resolution)
     source = abstract_image(source, abstraction)
     source = adjust_tone(source, exposure, shadows, highlights)
     if grayscale_method in ("coherent-regions", "adaptive-regions"):
         result, region_labels, region_values = _adaptive_region_grayscale(source, levels, abstraction)
+        return _restore_output_size(result, original_size), region_labels, region_values
+
+    if grayscale_method == "edge-guided":
+        result, region_labels, region_values = _edge_guided_grayscale(source, levels, abstraction)
         return _restore_output_size(result, original_size), region_labels, region_values
 
     grayscale = np.asarray(ImageOps.grayscale(source), dtype=np.uint8)

@@ -5,7 +5,7 @@ type TransformRequest = {
   transform: "notan" | "grayscale";
   abstraction: number;
   levels: number;
-  grayscaleMethod: "even" | "histogram" | "coherent-regions" | "adaptive-regions";
+  grayscaleMethod: "even" | "histogram" | "edge-guided" | "coherent-regions" | "adaptive-regions";
   thresholdMethod: string;
   exposure: number;
   shadows: number;

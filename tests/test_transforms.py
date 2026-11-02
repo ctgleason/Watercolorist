@@ -5,6 +5,7 @@ from PIL import Image
 from watercolorist.abstraction import abstract_image
 from watercolorist.defaults import estimate_abstraction
 from watercolorist.transforms import (
+    _histogram_quantize_with_brightness_weight,
     adjust_tone,
     grayscale_study,
     _connected_value_regions,
@@ -48,6 +49,14 @@ def test_grayscale_study_uses_requested_number_of_values() -> None:
     assert set(np.asarray(result).ravel()) <= {0, 128, 255}
 
 
+def test_grayscale_study_supports_sixteen_values() -> None:
+    image = Image.fromarray(np.arange(256, dtype=np.uint8).reshape((16, 16)))
+
+    result = grayscale_study(image, levels=16, grayscale_method="even")
+
+    assert np.unique(np.asarray(result)).size == 16
+
+
 def test_histogram_mapping_uses_pixel_luminance_distribution() -> None:
     image = Image.new("RGB", (10, 1))
     image.putdata([(0, 0, 0)] * 7 + [(100, 100, 100)] * 2 + [(255, 255, 255)])
@@ -67,6 +76,61 @@ def test_histogram_mapping_handles_constant_luminance() -> None:
 
     assert np.unique(np.asarray(result)).size == 1
     assert result.getpixel((0, 0)) == 128
+
+
+def test_brightness_weight_moves_histogram_thresholds_toward_brighter_values() -> None:
+    luminance = np.array([0] * 100 + list(range(1, 256)), dtype=np.uint8)
+
+    uniform_bins = _histogram_quantize_with_brightness_weight(luminance, 4, 0.0)
+    bright_weighted = _histogram_quantize_with_brightness_weight(luminance, 4, 1.0)
+    first_uniform_cut = int(luminance[np.flatnonzero(uniform_bins > 0)[0]])
+    first_weighted_cut = int(luminance[np.flatnonzero(bright_weighted > 0)[0]])
+
+    assert first_weighted_cut > first_uniform_cut
+
+
+def test_edge_guided_mapping_preserves_prominent_boundary_between_flat_areas() -> None:
+    image = Image.new("RGB", (96, 48))
+    image.putdata([
+        (82, 82, 82) if x < 48 else (118, 118, 118)
+        for _y in range(48)
+        for x in range(96)
+    ])
+
+    result = grayscale_study(image, levels=2, grayscale_method="edge-guided")
+
+    assert result.getpixel((24, 24)) != result.getpixel((72, 24))
+
+
+def test_edge_guided_mapping_uses_pixel_histogram_for_texture() -> None:
+    checkerboard = (np.indices((48, 48)).sum(axis=0) % 2 * 255).astype(np.uint8)
+    image = Image.fromarray(checkerboard).convert("RGB")
+
+    histogram = np.asarray(grayscale_study(image, levels=2, grayscale_method="histogram"))
+    edge_guided = np.asarray(grayscale_study(image, levels=2, grayscale_method="edge-guided"))
+
+    assert np.array_equal(edge_guided, histogram)
+
+
+def test_edge_guided_regions_match_displayed_values() -> None:
+    image = Image.new("RGB", (96, 48))
+    image.putdata([
+        (80, 80, 80) if x < 48 else (120, 120, 120)
+        for _y in range(48)
+        for x in range(96)
+    ])
+
+    result, labels, values = grayscale_study_with_regions(
+        image,
+        levels=3,
+        grayscale_method="edge-guided",
+    )
+
+    assert labels is not None
+    assert values is not None
+    assert labels.shape == (48, 96)
+    for label in np.unique(labels):
+        assert np.unique(np.asarray(result)[labels == label]).size == 1
 
 
 def test_adaptive_regions_separate_large_areas_with_close_values() -> None:

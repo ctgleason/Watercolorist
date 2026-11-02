@@ -14,7 +14,7 @@ type Study = {
   abstraction: number;
   autoAbstraction: boolean;
   levels: number;
-  grayscaleMethod: "even" | "histogram" | "coherent-regions" | "adaptive-regions";
+  grayscaleMethod: "even" | "histogram" | "edge-guided" | "coherent-regions" | "adaptive-regions";
   thresholdMethod: string;
   exposure: number;
   shadows: number;
@@ -184,12 +184,13 @@ app.innerHTML = `
 
           <div class="setting" id="levels-setting" hidden>
             <div class="setting-line"><label for="levels">Number of values</label><output id="levels-output" for="levels">5</output></div>
-            <input id="levels" type="range" min="2" max="9" step="1" value="5" />
-            <div class="range-ends"><span>2 values</span><span>9 values</span></div>
+            <input id="levels" type="range" min="2" max="16" step="1" value="5" />
+            <div class="range-ends"><span>2 values</span><span>16 values</span></div>
             <label for="grayscale-method">Value mapping</label>
             <select id="grayscale-method">
               <option value="even">Even steps</option>
               <option value="histogram">Histogram</option>
+              <option value="edge-guided">Edge-guided hybrid</option>
               <option value="coherent-regions">Coherent regions (superpixels)</option>
             </select>
             <p class="setting-help" id="grayscale-method-help">Maps each pixel into fixed-width luminance intervals.</p>
@@ -471,6 +472,8 @@ const updateSettings = () => {
   transformTitle.textContent = transform === "notan" ? "Notan study" : "Grayscale study";
   grayscaleMethodHelp.textContent = grayscaleMethodSelect.value === "histogram"
     ? "Uses the luminance histogram to distribute pixels across the requested values."
+    : grayscaleMethodSelect.value === "edge-guided"
+      ? "Preserves strong edges in flat areas; uses texture bins with extra weight for brighter values."
     : grayscaleMethodSelect.value === "coherent-regions" || grayscaleMethodSelect.value === "adaptive-regions"
       ? "Segments coherent color areas and assigns each area a shared value."
       : "Maps each pixel into fixed-width luminance intervals.";
