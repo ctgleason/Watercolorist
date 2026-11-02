@@ -7,6 +7,7 @@ from watercolorist.defaults import estimate_abstraction
 from watercolorist.transforms import (
     adjust_tone,
     grayscale_study,
+    _connected_value_regions,
     grayscale_study_with_regions,
     merge_grayscale_regions,
     notan_study,
@@ -88,6 +89,7 @@ def test_adaptive_grayscale_returns_source_sized_region_labels() -> None:
     assert region_labels is not None
     assert region_values is not None
     assert region_labels.shape == (32, 64)
+    assert region_labels.dtype == np.uint32
     assert np.unique(region_labels).size >= 2
     assert result.size == image.size
 
@@ -111,6 +113,30 @@ def test_even_grayscale_returns_editable_region_maps() -> None:
     assert region_labels.shape == (32, 64)
     assert int(region_labels[16, 16]) != int(region_labels[16, 48])
     assert result.getpixel((16, 16)) != result.getpixel((48, 16))
+    for label in np.unique(region_labels):
+        assert np.unique(np.asarray(result)[region_labels == label]).size == 1
+
+
+def test_connected_value_regions_keep_disconnected_areas_separate() -> None:
+    grayscale = np.array(
+        [[0, 255, 0], [0, 0, 0], [0, 255, 0]],
+        dtype=np.uint8,
+    )
+
+    labels, values = _connected_value_regions(grayscale)
+
+    assert labels.dtype == np.uint32
+    assert labels[0, 1] != labels[2, 1]
+    assert values[labels[0, 1]] == values[labels[2, 1]] == 255
+
+
+def test_connected_value_region_labels_exceed_uint8_range() -> None:
+    grayscale = np.indices((33, 33)).sum(axis=0).astype(np.uint8) % 2 * 255
+
+    labels, values = _connected_value_regions(grayscale)
+
+    assert np.unique(labels).size > 255
+    assert values.size == np.unique(labels).size
 
 
 def test_combining_regions_assigns_one_shared_value_and_label() -> None:

@@ -215,40 +215,63 @@ def _adaptive_region_grayscale(
     result = Image.fromarray(mapped, mode="L")
     return (
         result.resize(rgb_image.size, Image.Resampling.NEAREST),
-        labels.astype(np.uint8),
+        labels.astype(np.uint32),
         region_values.astype(np.uint8),
     )
 
 
-def _region_map_for_grayscale(
-    image: Image.Image,
-    grayscale: Image.Image,
-    levels: int,
-    abstraction: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Create selectable spatial regions for any grayscale mapping method."""
-    color_image = load_rgb(image)
-    grayscale_image = grayscale.convert("L")
-    analysis_color = color_image.copy()
-    analysis_color.thumbnail((512, 512), Image.Resampling.BOX)
-    analysis_gray = grayscale_image.resize(analysis_color.size, Image.Resampling.NEAREST)
-    color = np.asarray(analysis_color, dtype=np.uint8)
-    gray = np.asarray(analysis_gray, dtype=np.uint8)
+def _connected_value_regions(grayscale: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Label 4-connected components of identical grayscale values."""
+    if grayscale.ndim != 2 or grayscale.dtype != np.uint8:
+        raise ValueError("grayscale must be a two-dimensional uint8 image")
+    height, width = grayscale.shape
+    labels = np.zeros((height, width), dtype=np.int32)
+    parents = [0]
 
-    target_regions = max(24, min(200, round(600 / max(1.0, abstraction**0.5))))
-    region_spacing = max(2, round(np.sqrt(color.shape[0] * color.shape[1] / target_regions)))
-    labels = _slic_region_labels(color, region_spacing)
-    flat_labels = labels.ravel()
-    region_count = int(flat_labels.max()) + 1
-    counts = np.bincount(flat_labels, minlength=region_count).astype(np.float64)
-    means = np.bincount(
-        flat_labels,
-        weights=gray.ravel().astype(np.float64),
-        minlength=region_count,
-    ) / np.maximum(counts, 1.0)
-    palette = np.rint(np.arange(levels, dtype=np.float64) * 255 / (levels - 1)).astype(np.uint8)
-    value_indices = np.abs(means[:, np.newaxis] - palette[np.newaxis, :]).argmin(axis=1)
-    return labels.astype(np.uint8), palette[value_indices].astype(np.uint8)
+    def find(label: int) -> int:
+        root = label
+        while parents[root] != root:
+            root = parents[root]
+        while parents[label] != label:
+            next_label = parents[label]
+            parents[label] = root
+            label = next_label
+        return root
+
+    for y in range(height):
+        for x in range(width):
+            value = grayscale[y, x]
+            left = int(labels[y, x - 1]) if x > 0 and grayscale[y, x - 1] == value else 0
+            above = int(labels[y - 1, x]) if y > 0 and grayscale[y - 1, x] == value else 0
+            if left and above:
+                labels[y, x] = left
+                left_root = find(left)
+                above_root = find(above)
+                if left_root != above_root:
+                    parents[above_root] = left_root
+            elif left or above:
+                labels[y, x] = left or above
+            else:
+                labels[y, x] = len(parents)
+                parents.append(len(parents))
+
+    compact = np.empty(labels.size, dtype=np.uint32)
+    values: list[int] = []
+    compact_ids: dict[int, int] = {}
+    for index, provisional in enumerate(labels.ravel()):
+        root = find(int(provisional))
+        if root not in compact_ids:
+            compact_ids[root] = len(values)
+            values.append(int(grayscale.ravel()[index]))
+        compact[index] = compact_ids[root]
+    return compact.reshape((height, width)), np.asarray(values, dtype=np.uint8)
+
+
+def _region_map_for_grayscale(grayscale: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+    """Create selectable regions whose pixels all have the same displayed value."""
+    grayscale_image = grayscale.convert("L")
+    grayscale_image.thumbnail((512, 512), Image.Resampling.NEAREST)
+    return _connected_value_regions(np.asarray(grayscale_image, dtype=np.uint8))
 
 
 def _grayscale_study(
@@ -272,7 +295,7 @@ def _grayscale_study(
 
     grayscale = np.asarray(ImageOps.grayscale(source), dtype=np.uint8)
     result = Image.fromarray(_quantize_values(grayscale, levels))
-    region_labels, region_values = _region_map_for_grayscale(source, result, levels, abstraction)
+    region_labels, region_values = _region_map_for_grayscale(result)
     return _restore_output_size(result, original_size), region_labels, region_values
 
 
@@ -282,7 +305,6 @@ def _otsu_threshold(values: np.ndarray) -> int:
     total = histogram.sum()
     if total == 0:
         return 0
-
     occupied = np.flatnonzero(histogram)
     if occupied.size == 1:
         return int(occupied[0])
@@ -347,8 +369,8 @@ def merge_grayscale_regions(
     """Merge selected region labels and assign their area-weighted mean gray value."""
     if not 2 <= levels <= 256:
         raise ValueError("levels must be between 2 and 256")
-    if region_labels.ndim != 2 or region_labels.dtype != np.uint8:
-        raise ValueError("region_labels must be a two-dimensional uint8 label map")
+    if region_labels.ndim != 2 or region_labels.dtype not in (np.uint8, np.uint32):
+        raise ValueError("region_labels must be a two-dimensional uint8 or uint32 label map")
     unique_regions = sorted(set(int(label) for label in selected_regions))
     if len(unique_regions) < 2:
         raise ValueError("select at least two regions to combine")
@@ -360,17 +382,17 @@ def merge_grayscale_regions(
     if value_mode not in ("mean", "lighter", "darker"):
         raise ValueError("value_mode must be 'mean', 'lighter', or 'darker'")
     grayscale_image = image.convert("L")
-    labels_image = Image.fromarray(region_labels, mode="L").resize(
+    labels_image = Image.fromarray(region_labels.astype(np.int32), mode="I").resize(
         grayscale_image.size,
         Image.Resampling.NEAREST,
     )
     grayscale = np.asarray(grayscale_image, dtype=np.uint8).copy()
-    full_labels = np.asarray(labels_image, dtype=np.uint8)
+    full_labels = np.asarray(labels_image, dtype=np.uint32)
     selected_mask = np.isin(full_labels, unique_regions)
     if not np.any(selected_mask):
         raise ValueError("selected regions are not present in the image")
 
-    region_area = np.bincount(region_labels.ravel(), minlength=region_values.size)
+    region_area = np.bincount(region_labels.ravel().astype(np.int64), minlength=region_values.size)
     selected_values = region_values[unique_regions]
     if value_mode == "lighter":
         merged_value = int(np.max(selected_values))
@@ -382,7 +404,7 @@ def merge_grayscale_regions(
         merged_value = int(_quantize_values(np.array([mean_gray], dtype=np.uint8), levels)[0])
     grayscale[selected_mask] = merged_value
 
-    merged_labels = region_labels.copy()
+    merged_labels = region_labels.astype(np.uint32, copy=True)
     merged_labels[np.isin(merged_labels, unique_regions)] = unique_regions[0]
     merged_values = region_values.copy()
     merged_values[unique_regions] = merged_value

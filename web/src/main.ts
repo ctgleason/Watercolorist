@@ -20,7 +20,7 @@ type Study = {
   shadows: number;
   highlights: number;
   workingResolution: number;
-  regionLabels?: Uint8Array;
+  regionLabels?: Uint32Array;
   regionValues?: Uint8Array;
   regionWidth?: number;
   regionHeight?: number;
@@ -722,8 +722,10 @@ const combineSelectedRegions = async () => {
   ) return;
 
   const image = await study.blob.arrayBuffer();
-  const regionBuffer = new ArrayBuffer(study.regionLabels.length);
-  new Uint8Array(regionBuffer).set(study.regionLabels);
+  const regionBuffer = new ArrayBuffer(study.regionLabels.byteLength);
+  new Uint8Array(regionBuffer).set(
+    new Uint8Array(study.regionLabels.buffer, study.regionLabels.byteOffset, study.regionLabels.byteLength),
+  );
   if (!study.regionValues) return;
   const regionValuesBuffer = new ArrayBuffer(study.regionValues.length);
   new Uint8Array(regionValuesBuffer).set(study.regionValues);
@@ -842,9 +844,8 @@ const saveStudySnapshot = async (study: Study) => {
 
   await writeSnapshotFile(paintingFolder, imageName, study.blob);
   if (regionLabelsName && study.regionLabels) {
-    const regionBytes = new Uint8Array(study.regionLabels.length);
-    regionBytes.set(study.regionLabels);
-    await writeSnapshotFile(paintingFolder, regionLabelsName, new Blob([regionBytes.buffer]));
+    const regionBytes = new Uint8Array(study.regionLabels.buffer, study.regionLabels.byteOffset, study.regionLabels.byteLength);
+    await writeSnapshotFile(paintingFolder, regionLabelsName, new Blob([regionBytes.slice().buffer]));
   }
   if (regionValuesName && study.regionValues) {
     const regionValueBytes = new Uint8Array(study.regionValues.length);
@@ -1112,7 +1113,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
       ...previousStudy,
       blob,
       url: URL.createObjectURL(blob),
-      regionLabels: new Uint8Array(message.regions),
+      regionLabels: new Uint32Array(message.regions),
       regionValues: new Uint8Array(message.regionValues),
       regionWidth: message.regionWidth,
       regionHeight: message.regionHeight,
@@ -1146,7 +1147,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     workingResolution: Number(workingResolutionSelect.value),
     ...(message.regions && message.regionWidth && message.regionHeight
       ? {
-          regionLabels: new Uint8Array(message.regions),
+          regionLabels: new Uint32Array(message.regions),
           ...(message.regionValues ? { regionValues: new Uint8Array(message.regionValues) } : {}),
           regionWidth: message.regionWidth,
           regionHeight: message.regionHeight,

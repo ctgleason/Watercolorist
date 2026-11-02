@@ -210,7 +210,7 @@ import numpy as np
 from PIL import Image
 from watercolorist.transforms import merge_grayscale_regions
 
-_labels = np.frombuffer(open(${JSON.stringify(regionPath)}, "rb").read(), dtype=np.uint8).copy()
+_labels = np.frombuffer(open(${JSON.stringify(regionPath)}, "rb").read(), dtype=np.uint32).copy()
 _labels = _labels.reshape((${data.regionHeight}, ${data.regionWidth}))
 _values = np.frombuffer(open(${JSON.stringify(regionValuesPath)}, "rb").read(), dtype=np.uint8).copy()
 _merged_image, _merged_labels, _merged_values = merge_grayscale_regions(
@@ -281,9 +281,7 @@ if _watercolorist_transform == "notan":
         highlights=_watercolorist_highlights,
         working_resolution=_watercolorist_working_resolution,
     )
-    _region_labels, _region_values = _region_map_for_grayscale(
-        _source, _study, 2, _watercolorist_abstraction
-    )
+    _region_labels, _region_values = _region_map_for_grayscale(_study)
 else:
     _study, _region_labels, _region_values = grayscale_study_with_regions(
         _source,
@@ -297,13 +295,11 @@ else:
     )
 _study.save(${JSON.stringify(outputPath)}, format="PNG")
 if _region_labels is not None:
-    _region_image = Image.fromarray(_region_labels, mode="L")
-    _region_image.thumbnail((512, 512), Image.Resampling.NEAREST)
-    _region_width, _region_height = _region_image.size
+    _region_height, _region_width = _region_labels.shape
     with open(${JSON.stringify(`/watercolorist-region-values-${data.id}.bin`)}, "wb") as _region_values_file:
         _region_values_file.write(_region_values.tobytes())
     with open(${JSON.stringify(`/watercolorist-label-map-${data.id}.bin`)}, "wb") as _region_file:
-        _region_file.write(_region_image.tobytes())
+        _region_file.write(_region_labels.tobytes())
 else:
     _region_width = _region_height = 0
 `);
