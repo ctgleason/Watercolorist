@@ -127,12 +127,29 @@ def _slic_region_labels(rgb: np.ndarray, region_spacing: int) -> np.ndarray:
     centers_x = center_x.ravel().astype(np.float32)
     if centers_y.size == 0:
         return np.zeros((height, width), dtype=np.int32)
+    luminance = np.dot(color, np.array([0.299, 0.587, 0.114], dtype=np.float32))
+    gradient_y = np.gradient(luminance, axis=0) if height > 1 else np.zeros_like(luminance)
+    gradient_x = np.gradient(luminance, axis=1) if width > 1 else np.zeros_like(luminance)
+    gradient = np.hypot(gradient_y, gradient_x)
+    for index, (cy, cx) in enumerate(zip(centers_y, centers_x, strict=True)):
+        y = int(cy)
+        x = int(cx)
+        y0, y1 = max(0, y - 1), min(height, y + 2)
+        x0, x1 = max(0, x - 1), min(width, x + 2)
+        local_gradient = gradient[y0:y1, x0:x1]
+        if gradient[y, x] > local_gradient.min():
+            offset_y, offset_x = np.unravel_index(
+                np.argmin(local_gradient),
+                local_gradient.shape,
+            )
+            centers_y[index] = y0 + offset_y
+            centers_x[index] = x0 + offset_x
     centers_color = color[centers_y.astype(np.int32), centers_x.astype(np.int32)].copy()
-    spatial_weight = np.float32((18.0 / spacing) ** 2)
+    spatial_weight = np.float32((10.0 / spacing) ** 2)
     yy, xx = np.mgrid[:height, :width].astype(np.float32)
     labels = np.zeros((height, width), dtype=np.int32)
 
-    for _ in range(5):
+    for _ in range(8):
         distances = np.full((height, width), np.inf, dtype=np.float32)
         labels.fill(0)
         for index, (cy, cx) in enumerate(zip(centers_y, centers_x, strict=True)):
@@ -179,11 +196,11 @@ def _adaptive_region_grayscale(
 
     rgb_image = load_rgb(image)
     analysis = rgb_image.copy()
-    analysis.thumbnail((512, 512), Image.Resampling.BOX)
+    analysis.thumbnail((768, 768), Image.Resampling.BOX)
     rgb = np.asarray(analysis, dtype=np.uint8)
     luminance = np.asarray(ImageOps.grayscale(analysis), dtype=np.uint8)
 
-    target_regions = max(24, min(200, round(600 / max(1.0, abstraction**0.5))))
+    target_regions = max(48, min(400, round(1200 / max(1.0, abstraction**0.5))))
     region_spacing = max(2, round(np.sqrt(rgb.shape[0] * rgb.shape[1] / target_regions)))
     labels = _slic_region_labels(rgb, region_spacing)
     flat_labels = labels.ravel()
@@ -213,18 +230,20 @@ def _adaptive_region_grayscale(
     region_values = value_lut[region_levels]
     mapped = region_values[labels]
     result = Image.fromarray(mapped, mode="L")
+    labels, source_region_ids = _connected_value_regions(labels.astype(np.int32))
+    region_values = region_values[source_region_ids]
     return (
         result.resize(rgb_image.size, Image.Resampling.NEAREST),
-        labels.astype(np.uint32),
+        labels,
         region_values.astype(np.uint8),
     )
 
 
-def _connected_value_regions(grayscale: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Label 4-connected components of identical grayscale values."""
-    if grayscale.ndim != 2 or grayscale.dtype != np.uint8:
-        raise ValueError("grayscale must be a two-dimensional uint8 image")
-    height, width = grayscale.shape
+def _connected_value_regions(source_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Label 4-connected components of equal integer values."""
+    if source_values.ndim != 2 or source_values.dtype.kind not in "ui":
+        raise ValueError("values must be a two-dimensional integer array")
+    height, width = source_values.shape
     labels = np.zeros((height, width), dtype=np.int32)
     parents = [0]
 
@@ -240,9 +259,9 @@ def _connected_value_regions(grayscale: np.ndarray) -> tuple[np.ndarray, np.ndar
 
     for y in range(height):
         for x in range(width):
-            value = grayscale[y, x]
-            left = int(labels[y, x - 1]) if x > 0 and grayscale[y, x - 1] == value else 0
-            above = int(labels[y - 1, x]) if y > 0 and grayscale[y - 1, x] == value else 0
+            value = source_values[y, x]
+            left = int(labels[y, x - 1]) if x > 0 and source_values[y, x - 1] == value else 0
+            above = int(labels[y - 1, x]) if y > 0 and source_values[y - 1, x] == value else 0
             if left and above:
                 labels[y, x] = left
                 left_root = find(left)
@@ -256,15 +275,15 @@ def _connected_value_regions(grayscale: np.ndarray) -> tuple[np.ndarray, np.ndar
                 parents.append(len(parents))
 
     compact = np.empty(labels.size, dtype=np.uint32)
-    values: list[int] = []
+    component_values: list[int] = []
     compact_ids: dict[int, int] = {}
     for index, provisional in enumerate(labels.ravel()):
         root = find(int(provisional))
         if root not in compact_ids:
-            compact_ids[root] = len(values)
-            values.append(int(grayscale.ravel()[index]))
+            compact_ids[root] = len(component_values)
+            component_values.append(int(source_values.ravel()[index]))
         compact[index] = compact_ids[root]
-    return compact.reshape((height, width)), np.asarray(values, dtype=np.uint8)
+    return compact.reshape((height, width)), np.asarray(component_values, dtype=source_values.dtype)
 
 
 def _region_map_for_grayscale(grayscale: Image.Image) -> tuple[np.ndarray, np.ndarray]:

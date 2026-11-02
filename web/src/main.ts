@@ -603,9 +603,9 @@ const renderRegionOverlay = (study: Study) => {
   const selectedRegionsCount = selectedRegionSeeds.size;
   regionSelectionLabel.textContent = selectedRegionsCount === 0
     ? (regionMultiSelectMode
-      ? "Tap regions to add or remove seeds; nearby similar regions join."
+      ? "Tap any region to add it; similar-value growth stays connected to that tap."
       : "Click a region; ⌘/Ctrl-click adds seeds. Similar regions join only when touching.")
-    : `${selectedRegionsCount} seed${selectedRegionsCount === 1 ? "" : "s"} · ${selectedRegionIds.size} region${selectedRegionIds.size === 1 ? "" : "s"} selected`;
+    : `${selectedRegionsCount} seed${selectedRegionsCount === 1 ? "" : "s"} · ${selectedRegionIds.size} region${selectedRegionIds.size === 1 ? "" : "s"} selected${regionMultiSelectMode ? "; each tap adds a separate connected selection" : ""}`;
   regionMultiSelectButton.textContent = regionMultiSelectMode ? "Done selecting" : "Add regions";
   regionMultiSelectButton.setAttribute("aria-pressed", String(regionMultiSelectMode));
   combineRegionsButton.disabled = selectedRegionIds.size < 2 || pendingMergeRequest !== undefined;
@@ -647,18 +647,21 @@ const updateRegionSelection = (study: Study) => {
     }
   }
 
-  const seedValues = [...selectedRegionSeeds]
-    .filter((regionId) => regionId >= 0 && regionId < study.regionValues!.length)
-    .map((regionId) => Number(study.regionValues![regionId]));
-  const queue = [...selectedRegionSeeds];
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const regionId = queue[cursor];
-    for (const neighbor of adjacency[regionId] ?? []) {
-      if (selectedRegionIds.has(neighbor)) continue;
-      const value = Number(study.regionValues[neighbor]);
-      if (seedValues.some((seedValue) => Math.abs(value - seedValue) <= tolerance)) {
-        selectedRegionIds.add(neighbor);
-        queue.push(neighbor);
+  for (const seedId of selectedRegionSeeds) {
+    if (seedId < 0 || seedId >= study.regionValues.length) continue;
+    const seedValue = Number(study.regionValues[seedId]);
+    const visited = new Set<number>([seedId]);
+    const queue = [seedId];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const regionId = queue[cursor];
+      for (const neighbor of adjacency[regionId] ?? []) {
+        if (visited.has(neighbor)) continue;
+        const value = Number(study.regionValues[neighbor]);
+        if (Math.abs(value - seedValue) <= tolerance) {
+          visited.add(neighbor);
+          selectedRegionIds.add(neighbor);
+          queue.push(neighbor);
+        }
       }
     }
   }
@@ -671,7 +674,10 @@ const selectRegionAt = (event: MouseEvent) => {
   const x = Math.min(study.regionWidth - 1, Math.max(0, Math.floor((event.clientX - bounds.left) / bounds.width * study.regionWidth)));
   const y = Math.min(study.regionHeight - 1, Math.max(0, Math.floor((event.clientY - bounds.top) / bounds.height * study.regionHeight)));
   const regionId = study.regionLabels[y * study.regionWidth + x];
-  if (regionMultiSelectMode || event.metaKey || event.ctrlKey) {
+  if (regionMultiSelectMode) {
+    if (selectedRegionSeeds.has(regionId)) selectedRegionSeeds.delete(regionId);
+    else selectedRegionSeeds.add(regionId);
+  } else if (event.metaKey || event.ctrlKey) {
     if (selectedRegionSeeds.has(regionId)) selectedRegionSeeds.delete(regionId);
     else selectedRegionSeeds.add(regionId);
   } else {

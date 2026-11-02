@@ -92,6 +92,9 @@ def test_adaptive_grayscale_returns_source_sized_region_labels() -> None:
     assert region_labels.dtype == np.uint32
     assert np.unique(region_labels).size >= 2
     assert result.size == image.size
+    sampled_result = np.asarray(result.resize((region_labels.shape[1], region_labels.shape[0]), Image.Resampling.NEAREST))
+    for region_id in np.unique(region_labels):
+        assert np.unique(sampled_result[region_labels == region_id]).size == 1
 
 
 def test_even_grayscale_returns_editable_region_maps() -> None:
@@ -128,6 +131,18 @@ def test_connected_value_regions_keep_disconnected_areas_separate() -> None:
     assert labels.dtype == np.uint32
     assert labels[0, 1] != labels[2, 1]
     assert values[labels[0, 1]] == values[labels[2, 1]] == 255
+
+
+def test_disconnected_adaptive_label_pieces_become_separate_selectable_regions() -> None:
+    raw_labels = np.array(
+        [[3, 0, 0, 3]],
+        dtype=np.int32,
+    )
+
+    labels, source_ids = _connected_value_regions(raw_labels)
+
+    assert labels[0, 0] != labels[0, 3]
+    assert source_ids[labels[0, 0]] == source_ids[labels[0, 3]] == 3
 
 
 def test_connected_value_region_labels_exceed_uint8_range() -> None:
