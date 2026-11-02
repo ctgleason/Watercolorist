@@ -132,15 +132,25 @@ def _histogram_quantize_with_brightness_weight(
     values: np.ndarray,
     levels: int,
     brightness_weight: float,
+    sample_weights: np.ndarray | None = None,
+    max_level_above_even: int | None = None,
 ) -> np.ndarray:
-    """Map by histogram rank, optionally giving brighter pixels more histogram weight."""
+    """Map by histogram rank, optionally weighting samples and brighter luminance."""
     if not 2 <= levels <= 256:
         raise ValueError("levels must be between 2 and 256")
     if not 0.0 <= brightness_weight <= 4.0:
         raise ValueError("brightness_weight must be between 0 and 4")
     flat_values = values.ravel()
     normalized_luminance = flat_values.astype(np.float64) / 255.0
-    pixel_weights = 1.0 + brightness_weight * normalized_luminance**2
+    if sample_weights is None:
+        base_weights = np.ones(flat_values.size, dtype=np.float64)
+    else:
+        if sample_weights.shape != values.shape:
+            raise ValueError("sample_weights must have the same shape as values")
+        base_weights = sample_weights.ravel().astype(np.float64)
+        if np.any(base_weights < 0):
+            raise ValueError("sample_weights must be non-negative")
+    pixel_weights = base_weights * (1.0 + brightness_weight * normalized_luminance**2)
     histogram = np.bincount(flat_values, weights=pixel_weights, minlength=256)
     total = histogram.sum()
     if total == 0:
@@ -150,6 +160,16 @@ def _histogram_quantize_with_brightness_weight(
     midpoint_ranks = cumulative - histogram / 2.0
     level_lut = np.floor(midpoint_ranks * levels / total).astype(np.int32)
     np.clip(level_lut, 0, levels - 1, out=level_lut)
+    if max_level_above_even is not None:
+        if max_level_above_even < 0:
+            raise ValueError("max_level_above_even must be non-negative")
+        even_values = _quantize_values(np.arange(256, dtype=np.uint8), levels)
+        even_levels = np.rint(even_values.astype(np.float64) * (levels - 1) / 255).astype(np.int32)
+        level_lut = np.clip(
+            level_lut,
+            np.maximum(0, even_levels - max_level_above_even),
+            np.minimum(levels - 1, even_levels + max_level_above_even),
+        )
     palette = np.rint(np.arange(levels, dtype=np.float64) * 255 / (levels - 1)).astype(np.uint8)
     return palette[level_lut[values]]
 
@@ -364,16 +384,28 @@ def _edge_guided_grayscale(
         minlength=merged_count,
     ) / np.maximum(counts, 1.0)
 
-    pixel_values = _histogram_quantize_with_brightness_weight(luminance, levels, 4.0)
-    mean_values = _histogram_quantize_with_brightness_weight(
-        np.rint(means).astype(np.uint8), levels, 4.0
+    histogram = np.bincount(luminance.ravel(), minlength=256).astype(np.float64)
+    value_lut = _histogram_quantize_with_brightness_weight(
+        np.arange(256, dtype=np.uint8),
+        levels,
+        4.0,
+        sample_weights=histogram,
+        max_level_above_even=1,
     )
+    pixel_values = value_lut[luminance]
+    mean_values = value_lut[np.rint(means).astype(np.uint8)]
     mapped = pixel_values.copy()
     flat_mapped = mapped.ravel()
     flat_variances = variances[flat_labels]
     flat_mean_values = mean_values[flat_labels]
     flat_mapped[flat_variances <= 18.0**2] = flat_mean_values[flat_variances <= 18.0**2]
+    even_values = _quantize_values(luminance, levels)
+    mapped = np.maximum(mapped, even_values)
     result = Image.fromarray(mapped, mode="L").resize(rgb_image.size, Image.Resampling.NEAREST)
+    source_even = _quantize_values(np.asarray(ImageOps.grayscale(rgb_image), dtype=np.uint8), levels)
+    step = int(np.ceil(255 / (levels - 1)))
+    source_ceiling = np.minimum(255, source_even.astype(np.uint16) + step).astype(np.uint8)
+    result = Image.fromarray(np.clip(np.asarray(result), source_even, source_ceiling), mode="L")
     output_labels, output_values = _region_map_for_grayscale(result)
     return result, output_labels, output_values
 

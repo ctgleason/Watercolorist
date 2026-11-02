@@ -89,6 +89,20 @@ def test_brightness_weight_moves_histogram_thresholds_toward_brighter_values() -
     assert first_weighted_cut > first_uniform_cut
 
 
+def test_region_histogram_respects_region_pixel_area() -> None:
+    region_means = np.array([24, 208], dtype=np.uint8)
+
+    equal_region_weight = _histogram_quantize_with_brightness_weight(
+        region_means, 5, 4.0
+    )
+    area_weighted = _histogram_quantize_with_brightness_weight(
+        region_means, 5, 4.0, sample_weights=np.array([1000.0, 1.0])
+    )
+
+    assert equal_region_weight[0] != area_weighted[0]
+    assert area_weighted[0] < area_weighted[1]
+
+
 def test_edge_guided_mapping_preserves_prominent_boundary_between_flat_areas() -> None:
     image = Image.new("RGB", (96, 48))
     image.putdata([
@@ -100,6 +114,50 @@ def test_edge_guided_mapping_preserves_prominent_boundary_between_flat_areas() -
     result = grayscale_study(image, levels=2, grayscale_method="edge-guided")
 
     assert result.getpixel((24, 24)) != result.getpixel((72, 24))
+
+
+def test_edge_guided_does_not_assign_large_dark_area_a_bright_value() -> None:
+    image = Image.new("RGB", (100, 40))
+    image.putdata([
+        (24, 24, 24) if x < 90 else (208, 208, 208)
+        for _y in range(40)
+        for x in range(100)
+    ])
+
+    result = grayscale_study(image, levels=5, grayscale_method="edge-guided")
+
+    assert result.getpixel((45, 20)) < result.getpixel((95, 20))
+    assert result.getpixel((45, 20)) < 128
+
+
+def test_edge_guided_dark_values_stay_near_even_step_anchor_at_sixteen_levels() -> None:
+    image = Image.new("RGB", (100, 40))
+    image.putdata([
+        (24, 24, 24) if x < 90 else (208, 208, 208)
+        for _y in range(40)
+        for x in range(100)
+    ])
+
+    result = grayscale_study(image, levels=16, grayscale_method="edge-guided")
+    even = grayscale_study(image, levels=16, grayscale_method="even")
+
+    assert even.getpixel((45, 20)) <= result.getpixel((45, 20)) <= even.getpixel((45, 20)) + 17
+
+
+def test_edge_guided_never_maps_pixels_darker_than_even_steps() -> None:
+    image = Image.new("RGB", (40, 20))
+    image.putdata([
+        (value, value, value)
+        for _y in range(20)
+        for value in range(40)
+    ])
+
+    edge = np.asarray(grayscale_study(image, levels=5, grayscale_method="edge-guided"))
+    even = np.asarray(grayscale_study(image, levels=5, grayscale_method="even"))
+
+    assert np.all(edge >= even)
+    step = int(np.ceil(255 / 4))
+    assert np.all(edge <= np.minimum(255, even.astype(np.uint16) + step))
 
 
 def test_edge_guided_mapping_uses_pixel_histogram_for_texture() -> None:
