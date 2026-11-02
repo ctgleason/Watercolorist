@@ -64,10 +64,13 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.45px; }
 .history-button:disabled, .snapshot-button:disabled { color: #adb3aa; cursor: not-allowed; }
 .history-count { min-width: 39px; color: #90978e; font-size: 9px; text-align: center; font-variant-numeric: tabular-nums; }
 .snapshot-button { min-height: 29px; padding: 0 10px; border: 1px solid #dfe4da; border-radius: 7px; background: #fffefa; color: #42604c; cursor: pointer; font-size: 10px; font-weight: 600; }
-.auto-abstraction-option, .save-prompt-option { display: flex; align-items: center; gap: 8px; color: #647168; cursor: pointer; font-size: 10px; }
-.auto-abstraction-option { margin-top: 11px; }
-.save-prompt-option { margin-top: 17px; }
-.auto-abstraction-option input, .save-prompt-option input { width: 14px; height: 14px; margin: 0; accent-color: var(--green); }
+.save-preferences-panel { margin-top: 14px; border: 1px solid #e8e9e2; border-radius: 9px; background: #fcfbf7; }
+.save-preferences-panel summary { display: flex; min-height: 38px; align-items: center; justify-content: space-between; padding: 0 11px; color: #647168; cursor: pointer; font-size: 10px; font-weight: 600; list-style: none; }
+.save-preferences-panel summary::-webkit-details-marker { display: none; }
+.save-preferences-panel summary::after { margin-left: 9px; color: #87948a; content: "+"; font-size: 15px; font-weight: 400; }
+.save-preferences-panel[open] summary::after { content: "−"; }
+.save-prompt-option { display: flex; align-items: center; gap: 8px; padding: 10px 11px; border-top: 1px solid #efeee8; color: #647168; cursor: pointer; font-size: 10px; }
+.save-prompt-option input { width: 14px; height: 14px; margin: 0; accent-color: var(--green); }
 .tone-panel { margin-top: 18px; border: 1px solid #e8e9e2; border-radius: 9px; background: #fcfbf7; }
 .tone-panel summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 0 11px; color: #56645a; cursor: pointer; font-size: 11px; font-weight: 600; list-style: none; }
 .tone-panel summary::-webkit-details-marker { display: none; }

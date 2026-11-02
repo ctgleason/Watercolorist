@@ -198,7 +198,6 @@ app.innerHTML = `
             <div class="setting-line"><label for="abstraction">Abstraction scale</label><output id="abstraction-output" for="abstraction">1×</output></div>
             <input id="abstraction" type="range" min="1" max="24" step="1" value="1" />
             <div class="range-ends"><span>Fine</span><span>Broad shapes</span></div>
-            <label class="auto-abstraction-option"><input id="auto-abstraction" type="checkbox" checked /><span>Use image-aware default</span></label>
           </div>
 
           <div class="setting working-resolution-setting">
@@ -234,7 +233,10 @@ app.innerHTML = `
             </div>
           </details>
 
-          <label class="save-prompt-option"><input id="prompt-save" type="checkbox" /><span>Ask to save each new study</span></label>
+          <details class="save-preferences-panel">
+            <summary>Save preferences</summary>
+            <label class="save-prompt-option"><input id="prompt-save" type="checkbox" /><span>Ask before saving each new study</span></label>
+          </details>
 
           <button class="run-button" id="run-button" type="button" disabled><span id="run-label">Preparing Python…</span><span aria-hidden="true">→</span></button>
           <div class="status-message" id="status-message" role="status">Initializing the Python runtime…</div>
@@ -299,7 +301,6 @@ const levelsSetting = get<HTMLDivElement>("#levels-setting");
 const thresholdSelect = get<HTMLSelectElement>("#threshold-method");
 const abstractionSlider = get<HTMLInputElement>("#abstraction");
 const abstractionOutput = get<HTMLOutputElement>("#abstraction-output");
-const autoAbstractionCheckbox = get<HTMLInputElement>("#auto-abstraction");
 const levelsSlider = get<HTMLInputElement>("#levels");
 const levelsOutput = get<HTMLOutputElement>("#levels-output");
 const grayscaleMethodSelect = get<HTMLSelectElement>("#grayscale-method");
@@ -319,6 +320,7 @@ let pendingRequest: number | undefined;
 let nextRequestId = 1;
 let pendingEstimateId: number | undefined;
 let autoAbstractionScale: number | undefined;
+let autoAbstraction = true;
 let tonePreviewSource: Blob | undefined;
 let tonePreviewSourceFile: File | undefined;
 let tonePreviewResolution: number | undefined;
@@ -479,7 +481,7 @@ const updateRunButton = () => {
 
 const requestAbstractionEstimate = async () => {
   const file = selectedFile;
-  if (!file || !runtimeReady || !autoAbstractionCheckbox.checked || pendingEstimateId !== undefined) return;
+  if (!file || !runtimeReady || pendingEstimateId !== undefined) return;
   const id = nextRequestId++;
   pendingEstimateId = id;
   updateRunButton();
@@ -515,7 +517,7 @@ const setSelectedFile = (file: File) => {
   studyIndex = -1;
   snapshotRoot = undefined;
   promptSaveCheckbox.checked = false;
-  autoAbstractionCheckbox.checked = true;
+  autoAbstraction = true;
   autoAbstractionScale = undefined;
   workingResolutionSelect.value = "1";
   pendingEstimateId = undefined;
@@ -875,7 +877,7 @@ const showStudy = async (index: number) => {
   const study = studyHistory[studyIndex];
   get<HTMLInputElement>(`input[name="transform"][value="${study.transform}"]`).checked = true;
   abstractionSlider.value = String(study.abstraction);
-  autoAbstractionCheckbox.checked = study.autoAbstraction;
+  autoAbstraction = study.autoAbstraction;
   abstractionOutput.value = study.autoAbstraction ? `Auto · ${study.abstraction}×` : `${study.abstraction}×`;
   levelsSlider.value = String(study.levels);
   levelsOutput.value = String(study.levels);
@@ -961,7 +963,7 @@ for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="tra
 }
 
 abstractionSlider.addEventListener("input", () => {
-  autoAbstractionCheckbox.checked = false;
+  autoAbstraction = false;
   abstractionOutput.value = `${abstractionSlider.value}×`;
 });
 for (const slider of [exposureSlider, shadowsSlider, highlightsSlider]) {
@@ -975,19 +977,6 @@ levelsSlider.addEventListener("input", () => {
   levelsOutput.value = levelsSlider.value;
 });
 
-autoAbstractionCheckbox.addEventListener("change", () => {
-  if (!autoAbstractionCheckbox.checked) {
-    abstractionOutput.value = `${abstractionSlider.value}×`;
-    return;
-  }
-  if (autoAbstractionScale !== undefined) {
-    abstractionSlider.value = String(autoAbstractionScale);
-    abstractionOutput.value = `Auto · ${autoAbstractionScale}×`;
-    return;
-  }
-  void requestAbstractionEstimate();
-});
-
 workingResolutionSelect.addEventListener("change", () => {
   autoAbstractionScale = undefined;
   tonePreviewSource = undefined;
@@ -995,7 +984,7 @@ workingResolutionSelect.addEventListener("change", () => {
   tonePreviewResolution = undefined;
   pendingTonePreviewId = undefined;
   if (selectedFile) void prepareTonePreviewSource(selectedFile);
-  if (autoAbstractionCheckbox.checked) {
+  if (autoAbstraction) {
     pendingEstimateId = undefined;
     void requestAbstractionEstimate();
   }
@@ -1063,7 +1052,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     if (message.id !== pendingEstimateId) return;
     pendingEstimateId = undefined;
     autoAbstractionScale = message.abstraction;
-    if (autoAbstractionCheckbox.checked) {
+    if (autoAbstraction) {
       abstractionSlider.value = String(message.abstraction);
       abstractionOutput.value = `Auto · ${message.abstraction}×`;
       setStatus(`Suggested abstraction: ${message.abstraction}× · adjust if desired.`, "success");
@@ -1137,7 +1126,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     url: URL.createObjectURL(blob),
     transform: selectedTransform(),
     abstraction: Number(abstractionSlider.value),
-    autoAbstraction: autoAbstractionCheckbox.checked,
+    autoAbstraction,
     levels: Number(levelsSlider.value),
     grayscaleMethod: grayscaleMethodSelect.value as Study["grayscaleMethod"],
     thresholdMethod: thresholdSelect.value,
