@@ -14,7 +14,7 @@ type Study = {
   abstraction: number;
   autoAbstraction: boolean;
   levels: number;
-  grayscaleMethod: "even" | "adaptive-regions";
+  grayscaleMethod: "even" | "histogram" | "coherent-regions" | "adaptive-regions";
   thresholdMethod: string;
   exposure: number;
   shadows: number;
@@ -189,9 +189,10 @@ app.innerHTML = `
             <label for="grayscale-method">Value mapping</label>
             <select id="grayscale-method">
               <option value="even">Even steps</option>
-              <option value="adaptive-regions">Adaptive regions</option>
+              <option value="histogram">Histogram</option>
+              <option value="coherent-regions">Coherent regions (superpixels)</option>
             </select>
-            <p class="setting-help">Finds coherent areas and assigns values by their relative lightness.</p>
+            <p class="setting-help" id="grayscale-method-help">Maps each pixel into fixed-width luminance intervals.</p>
           </div>
 
           <div class="setting abstraction-setting">
@@ -304,6 +305,7 @@ const abstractionOutput = get<HTMLOutputElement>("#abstraction-output");
 const levelsSlider = get<HTMLInputElement>("#levels");
 const levelsOutput = get<HTMLOutputElement>("#levels-output");
 const grayscaleMethodSelect = get<HTMLSelectElement>("#grayscale-method");
+const grayscaleMethodHelp = get<HTMLParagraphElement>("#grayscale-method-help");
 const toneSummary = get<HTMLOutputElement>("#tone-summary");
 const exposureSlider = get<HTMLInputElement>("#exposure");
 const exposureOutput = get<HTMLOutputElement>("#exposure-output");
@@ -467,6 +469,11 @@ const updateSettings = () => {
   thresholdSetting.hidden = transform !== "notan";
   levelsSetting.hidden = transform !== "grayscale";
   transformTitle.textContent = transform === "notan" ? "Notan study" : "Grayscale study";
+  grayscaleMethodHelp.textContent = grayscaleMethodSelect.value === "histogram"
+    ? "Uses the luminance histogram to distribute pixels across the requested values."
+    : grayscaleMethodSelect.value === "coherent-regions" || grayscaleMethodSelect.value === "adaptive-regions"
+      ? "Segments coherent color areas and assigns each area a shared value."
+      : "Maps each pixel into fixed-width luminance intervals.";
 };
 
 const updateRunButton = () => {
@@ -967,6 +974,7 @@ uploadCard.addEventListener("drop", (event) => {
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="transform"]')) {
   radio.addEventListener("change", updateSettings);
 }
+grayscaleMethodSelect.addEventListener("change", updateSettings);
 
 abstractionSlider.addEventListener("input", () => {
   autoAbstraction = false;

@@ -9,7 +9,7 @@ from watercolorist.abstraction import abstract_image
 from watercolorist.images import load_rgb
 
 ThresholdMethod = Literal["otsu", "median"]
-GrayscaleMethod = Literal["even", "adaptive-regions"]
+GrayscaleMethod = Literal["even", "histogram", "coherent-regions", "adaptive-regions"]
 
 
 def _working_image(image: Image.Image, working_resolution: float) -> tuple[Image.Image, tuple[int, int]]:
@@ -115,6 +115,23 @@ def _quantize_values(values: np.ndarray, levels: int) -> np.ndarray:
     indices = np.rint(values.astype(np.float64) * (levels - 1) / 255)
     quantized = np.rint(indices * 255 / (levels - 1))
     return quantized.astype(np.uint8)
+
+
+def _histogram_quantize_values(values: np.ndarray, levels: int) -> np.ndarray:
+    """Map luminance values through equal-population bins from their histogram."""
+    if not 2 <= levels <= 256:
+        raise ValueError("levels must be between 2 and 256")
+    histogram = np.bincount(values.ravel(), minlength=256).astype(np.float64)
+    total = histogram.sum()
+    if total == 0:
+        return values.copy()
+
+    cumulative = np.cumsum(histogram)
+    midpoint_ranks = cumulative - histogram / 2.0
+    level_lut = np.floor(midpoint_ranks * levels / total).astype(np.int32)
+    np.clip(level_lut, 0, levels - 1, out=level_lut)
+    palette = np.rint(np.arange(levels, dtype=np.float64) * 255 / (levels - 1)).astype(np.uint8)
+    return palette[level_lut[values]]
 
 
 def _slic_region_labels(rgb: np.ndarray, region_spacing: int) -> np.ndarray:
@@ -303,17 +320,22 @@ def _grayscale_study(
     working_resolution: float,
     grayscale_method: GrayscaleMethod,
 ) -> tuple[Image.Image, np.ndarray | None, np.ndarray | None]:
-    if grayscale_method not in ("even", "adaptive-regions"):
-        raise ValueError("grayscale_method must be 'even' or 'adaptive-regions'")
+    if grayscale_method not in ("even", "histogram", "coherent-regions", "adaptive-regions"):
+        raise ValueError("grayscale_method must be 'even', 'histogram', or 'coherent-regions'")
     source, original_size = _working_image(image, working_resolution)
     source = abstract_image(source, abstraction)
     source = adjust_tone(source, exposure, shadows, highlights)
-    if grayscale_method == "adaptive-regions":
+    if grayscale_method in ("coherent-regions", "adaptive-regions"):
         result, region_labels, region_values = _adaptive_region_grayscale(source, levels, abstraction)
         return _restore_output_size(result, original_size), region_labels, region_values
 
     grayscale = np.asarray(ImageOps.grayscale(source), dtype=np.uint8)
-    result = Image.fromarray(_quantize_values(grayscale, levels))
+    quantized = (
+        _histogram_quantize_values(grayscale, levels)
+        if grayscale_method == "histogram"
+        else _quantize_values(grayscale, levels)
+    )
+    result = Image.fromarray(quantized)
     region_labels, region_values = _region_map_for_grayscale(result)
     return _restore_output_size(result, original_size), region_labels, region_values
 
@@ -368,7 +390,7 @@ def grayscale_study_with_regions(
     shadows: float = 0.0,
     highlights: float = 0.0,
     working_resolution: float = 1.0,
-    grayscale_method: GrayscaleMethod = "adaptive-regions",
+    grayscale_method: GrayscaleMethod = "coherent-regions",
 ) -> tuple[Image.Image, np.ndarray | None, np.ndarray | None]:
     """Create a grayscale study and return an editable region-label map if available."""
     return _grayscale_study(

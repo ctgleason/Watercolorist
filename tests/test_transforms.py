@@ -48,6 +48,27 @@ def test_grayscale_study_uses_requested_number_of_values() -> None:
     assert set(np.asarray(result).ravel()) <= {0, 128, 255}
 
 
+def test_histogram_mapping_uses_pixel_luminance_distribution() -> None:
+    image = Image.new("RGB", (10, 1))
+    image.putdata([(0, 0, 0)] * 7 + [(100, 100, 100)] * 2 + [(255, 255, 255)])
+
+    even = np.asarray(grayscale_study(image, levels=3, grayscale_method="even"))
+    histogram = np.asarray(grayscale_study(image, levels=3, grayscale_method="histogram"))
+
+    assert set(np.unique(histogram)) == {128, 255}
+    assert np.count_nonzero(histogram == 128) == 7
+    assert not np.array_equal(histogram, even)
+
+
+def test_histogram_mapping_handles_constant_luminance() -> None:
+    image = Image.new("RGB", (8, 8), (120, 120, 120))
+
+    result = grayscale_study(image, levels=5, grayscale_method="histogram")
+
+    assert np.unique(np.asarray(result)).size == 1
+    assert result.getpixel((0, 0)) == 128
+
+
 def test_adaptive_regions_separate_large_areas_with_close_values() -> None:
     image = Image.new("RGB", (64, 32))
     image.putdata([
@@ -57,7 +78,7 @@ def test_adaptive_regions_separate_large_areas_with_close_values() -> None:
     ])
 
     even = grayscale_study(image, levels=2, grayscale_method="even")
-    adaptive = grayscale_study(image, levels=2, grayscale_method="adaptive-regions")
+    adaptive = grayscale_study(image, levels=2, grayscale_method="coherent-regions")
 
     even_values = np.asarray(even)
     adaptive_values = np.asarray(adaptive)
@@ -83,7 +104,7 @@ def test_adaptive_grayscale_returns_source_sized_region_labels() -> None:
     result, region_labels, region_values = grayscale_study_with_regions(
         image,
         levels=2,
-        grayscale_method="adaptive-regions",
+        grayscale_method="coherent-regions",
     )
 
     assert region_labels is not None
@@ -118,6 +139,37 @@ def test_even_grayscale_returns_editable_region_maps() -> None:
     assert result.getpixel((16, 16)) != result.getpixel((48, 16))
     for label in np.unique(region_labels):
         assert np.unique(np.asarray(result)[region_labels == label]).size == 1
+
+
+def test_histogram_grayscale_returns_editable_regions_matching_displayed_values() -> None:
+    image = Image.new("RGB", (80, 10))
+    image.putdata(
+        [(20, 20, 20)] * 60
+        + [(100, 100, 100)] * 10
+        + [(230, 230, 230)] * 10
+    )
+
+    result, region_labels, region_values = grayscale_study_with_regions(
+        image,
+        levels=3,
+        grayscale_method="histogram",
+    )
+
+    assert region_labels is not None
+    assert region_values is not None
+    assert region_labels.shape == (10, 80)
+    sampled = np.asarray(result)
+    for label in np.unique(region_labels):
+        assert np.unique(sampled[region_labels == label]).size == 1
+
+
+def test_legacy_adaptive_regions_identifier_remains_supported() -> None:
+    image = Image.new("RGB", (32, 16), (90, 90, 90))
+
+    renamed = grayscale_study(image, grayscale_method="coherent-regions")
+    legacy = grayscale_study(image, grayscale_method="adaptive-regions")
+
+    assert np.array_equal(np.asarray(renamed), np.asarray(legacy))
 
 
 def test_connected_value_regions_keep_disconnected_areas_separate() -> None:
@@ -164,7 +216,7 @@ def test_combining_regions_assigns_one_shared_value_and_label() -> None:
     result, region_labels, region_values = grayscale_study_with_regions(
         image,
         levels=3,
-        grayscale_method="adaptive-regions",
+        grayscale_method="coherent-regions",
     )
     assert region_labels is not None
     assert region_values is not None
@@ -195,7 +247,7 @@ def test_combining_selected_regions_leaves_unselected_region_unchanged() -> None
     original, region_labels, region_values = grayscale_study_with_regions(
         image,
         levels=3,
-        grayscale_method="adaptive-regions",
+        grayscale_method="coherent-regions",
     )
     assert region_labels is not None
     assert region_values is not None
