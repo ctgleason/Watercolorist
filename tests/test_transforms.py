@@ -4,7 +4,13 @@ from PIL import Image
 
 from watercolorist.abstraction import abstract_image
 from watercolorist.defaults import estimate_abstraction
-from watercolorist.transforms import adjust_tone, grayscale_study, notan_study
+from watercolorist.transforms import (
+    adjust_tone,
+    grayscale_study,
+    grayscale_study_with_regions,
+    merge_grayscale_regions,
+    notan_study,
+)
 
 
 def test_abstraction_preserves_dimensions_and_rgb_mode() -> None:
@@ -39,6 +45,143 @@ def test_grayscale_study_uses_requested_number_of_values() -> None:
 
     assert result.mode == "L"
     assert set(np.asarray(result).ravel()) <= {0, 128, 255}
+
+
+def test_adaptive_regions_separate_large_areas_with_close_values() -> None:
+    image = Image.new("RGB", (64, 32))
+    image.putdata([
+        (100, 100, 100) if x < 32 else (110, 110, 110)
+        for _y in range(32)
+        for x in range(64)
+    ])
+
+    even = grayscale_study(image, levels=2, grayscale_method="even")
+    adaptive = grayscale_study(image, levels=2, grayscale_method="adaptive-regions")
+
+    even_values = np.asarray(even)
+    adaptive_values = np.asarray(adaptive)
+
+    assert np.unique(even_values).size == 1
+    assert set(np.unique(adaptive_values)) == {0, 255}
+    assert adaptive.getpixel((16, 16)) != adaptive.getpixel((48, 16))
+
+
+def test_grayscale_rejects_unknown_mapping_method() -> None:
+    with pytest.raises(ValueError, match="grayscale_method"):
+        grayscale_study(Image.new("RGB", (2, 2)), grayscale_method="unknown")
+
+
+def test_adaptive_grayscale_returns_source_sized_region_labels() -> None:
+    image = Image.new("RGB", (64, 32))
+    image.putdata([
+        (100, 100, 100) if x < 32 else (110, 110, 110)
+        for _y in range(32)
+        for x in range(64)
+    ])
+
+    result, region_labels, region_values = grayscale_study_with_regions(
+        image,
+        levels=2,
+        grayscale_method="adaptive-regions",
+    )
+
+    assert region_labels is not None
+    assert region_values is not None
+    assert region_labels.shape == (32, 64)
+    assert np.unique(region_labels).size >= 2
+    assert result.size == image.size
+
+
+def test_combining_regions_assigns_one_shared_value_and_label() -> None:
+    image = Image.new("RGB", (64, 32))
+    image.putdata([
+        (100, 100, 100) if x < 32 else (110, 110, 110)
+        for _y in range(32)
+        for x in range(64)
+    ])
+    result, region_labels, region_values = grayscale_study_with_regions(
+        image,
+        levels=3,
+        grayscale_method="adaptive-regions",
+    )
+    assert region_labels is not None
+    assert region_values is not None
+    left_label = int(region_labels[16, 16])
+    right_label = int(region_labels[16, 48])
+    assert left_label != right_label
+
+    merged, merged_labels, merged_values = merge_grayscale_regions(
+        result,
+        region_labels,
+        region_values,
+        [left_label, right_label],
+        levels=3,
+    )
+
+    assert merged.getpixel((16, 16)) == merged.getpixel((48, 16))
+    assert int(merged_labels[16, 16]) == int(merged_labels[16, 48])
+    assert merged_values[left_label] == merged_values[right_label]
+
+
+def test_combining_selected_regions_leaves_unselected_region_unchanged() -> None:
+    image = Image.new("RGB", (96, 32))
+    image.putdata([
+        (40, 40, 40) if x < 32 else (100, 100, 100) if x < 64 else (210, 210, 210)
+        for _y in range(32)
+        for x in range(96)
+    ])
+    original, region_labels, region_values = grayscale_study_with_regions(
+        image,
+        levels=3,
+        grayscale_method="adaptive-regions",
+    )
+    assert region_labels is not None
+    assert region_values is not None
+    left = (16, 16)
+    middle = (48, 16)
+    right = (80, 16)
+    selected = [int(region_labels[left[1], left[0]]), int(region_labels[middle[1], middle[0]])]
+    assert int(region_labels[right[1], right[0]]) not in selected
+
+    merged, merged_labels, _ = merge_grayscale_regions(
+        original, region_labels, region_values, selected, levels=3
+    )
+
+    assert merged.getpixel(left) == merged.getpixel(middle)
+    assert merged.getpixel(right) == original.getpixel(right)
+    assert int(merged_labels[left[1], left[0]]) == int(merged_labels[middle[1], middle[0]])
+    assert int(merged_labels[right[1], right[0]]) != int(merged_labels[left[1], left[0]])
+
+
+def test_region_merge_requires_at_least_two_selected_regions() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        merge_grayscale_regions(
+            Image.new("L", (2, 2)),
+            np.zeros((2, 2), dtype=np.uint8),
+            np.zeros(1, dtype=np.uint8),
+            [0],
+            levels=3,
+        )
+
+
+@pytest.mark.parametrize(("value_mode", "expected"), [("lighter", 255), ("darker", 0)])
+def test_region_merge_can_choose_lighter_or_darker_value(value_mode: str, expected: int) -> None:
+    image = Image.new("L", (4, 2))
+    image.putdata([0, 0, 255, 255] * 2)
+    labels = np.array([[0, 0, 1, 1], [0, 0, 1, 1]], dtype=np.uint8)
+    values = np.array([0, 255], dtype=np.uint8)
+
+    merged, _, merged_values = merge_grayscale_regions(
+        image,
+        labels,
+        values,
+        [0, 1],
+        levels=2,
+        value_mode=value_mode,  # type: ignore[arg-type]
+    )
+
+    assert set(np.asarray(merged).ravel()) == {expected}
+    assert set(merged_values) == {expected}
 
 
 def test_working_resolution_reduces_processing_and_restores_output_dimensions() -> None:

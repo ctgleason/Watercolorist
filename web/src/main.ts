@@ -14,14 +14,24 @@ type Study = {
   abstraction: number;
   autoAbstraction: boolean;
   levels: number;
+  grayscaleMethod: "even" | "adaptive-regions";
   thresholdMethod: string;
   exposure: number;
   shadows: number;
   highlights: number;
   workingResolution: number;
+  regionLabels?: Uint8Array;
+  regionValues?: Uint8Array;
+  regionWidth?: number;
+  regionHeight?: number;
   createdAt: Date;
   saved: boolean;
   snapshotNumber?: number;
+};
+
+type RegionMergeUndo = {
+  previousStudy: Study;
+  mergedStudy: Study;
 };
 
 type SnapshotWritable = {
@@ -57,8 +67,26 @@ type WorkerReply =
       packageLoadMs: number;
     }
   | { type: "estimate"; id: number; abstraction: number }
-    | { type: "tone-preview"; id: number; image: ArrayBuffer }
-  | { type: "complete"; id: number; image: ArrayBuffer; transformMs: number }
+  | { type: "tone-preview"; id: number; image: ArrayBuffer }
+  | {
+      type: "complete";
+      id: number;
+      image: ArrayBuffer;
+      transformMs: number;
+      regions?: ArrayBuffer;
+      regionValues?: ArrayBuffer;
+      regionWidth?: number;
+      regionHeight?: number;
+    }
+  | {
+      type: "merge-complete";
+      id: number;
+      image: ArrayBuffer;
+      regions: ArrayBuffer;
+      regionValues: ArrayBuffer;
+      regionWidth: number;
+      regionHeight: number;
+    }
   | { type: "error"; id?: number; message: string };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -110,7 +138,32 @@ app.innerHTML = `
               <p>Your study will appear here</p>
               <span>Choose an image and run a transformation</span>
             </div>
-            <img class="preview-image result-image" id="result-preview" alt="Generated image study" hidden />
+            <div class="result-stage" id="result-stage" hidden>
+              <img class="preview-image result-image" id="result-preview" alt="Generated image study" />
+              <canvas class="region-overlay" id="region-overlay" aria-label="Selectable grayscale regions"></canvas>
+            </div>
+          </div>
+          <div class="region-tools" id="region-tools" hidden>
+            <div class="region-selection-settings">
+              <span id="region-selection-label">Click a grayscale region to select it.</span>
+              <label class="region-tolerance-control" for="region-tolerance">
+                Similar values ±<output id="region-tolerance-output" for="region-tolerance">0</output>
+                <input id="region-tolerance" type="range" min="0" max="64" step="1" value="0" />
+              </label>
+            </div>
+            <div class="region-actions">
+              <button class="region-action region-multi-select" id="region-multi-select" type="button" aria-pressed="false" hidden>Add regions</button>
+              <label class="region-value-control" for="region-value-mode">Combined value
+                <select id="region-value-mode">
+                  <option value="mean">Average</option>
+                  <option value="lighter">Lighter</option>
+                  <option value="darker">Darker</option>
+                </select>
+              </label>
+              <button class="region-action" id="undo-region-merge" type="button" hidden>Undo combine</button>
+              <button class="region-action" id="clear-region-selection" type="button" disabled>Clear</button>
+              <button class="region-action region-combine" id="combine-regions" type="button" disabled>Combine regions</button>
+            </div>
           </div>
           <p class="image-caption" id="image-caption">No image selected</p>
         </div>
@@ -133,6 +186,12 @@ app.innerHTML = `
             <div class="setting-line"><label for="levels">Number of values</label><output id="levels-output" for="levels">5</output></div>
             <input id="levels" type="range" min="2" max="9" step="1" value="5" />
             <div class="range-ends"><span>2 values</span><span>9 values</span></div>
+            <label for="grayscale-method">Value mapping</label>
+            <select id="grayscale-method">
+              <option value="even">Even steps</option>
+              <option value="adaptive-regions">Adaptive regions</option>
+            </select>
+            <p class="setting-help">Finds coherent areas and assigns values by their relative lightness.</p>
           </div>
 
           <div class="setting abstraction-setting">
@@ -209,6 +268,18 @@ const uploadHint = get<HTMLSpanElement>("#upload-hint");
 const sourcePreview = get<HTMLImageElement>("#source-preview");
 const resultPreview = get<HTMLImageElement>("#result-preview");
 const resultEmpty = get<HTMLDivElement>("#result-empty");
+const resultCard = get<HTMLDivElement>("#result-card");
+const resultStage = get<HTMLDivElement>("#result-stage");
+const regionOverlay = get<HTMLCanvasElement>("#region-overlay");
+const regionTools = get<HTMLDivElement>("#region-tools");
+const regionSelectionLabel = get<HTMLSpanElement>("#region-selection-label");
+const combineRegionsButton = get<HTMLButtonElement>("#combine-regions");
+const clearRegionSelectionButton = get<HTMLButtonElement>("#clear-region-selection");
+const regionToleranceSlider = get<HTMLInputElement>("#region-tolerance");
+const regionToleranceOutput = get<HTMLOutputElement>("#region-tolerance-output");
+const regionValueModeSelect = get<HTMLSelectElement>("#region-value-mode");
+const undoRegionMergeButton = get<HTMLButtonElement>("#undo-region-merge");
+const regionMultiSelectButton = get<HTMLButtonElement>("#region-multi-select");
 const runButton = get<HTMLButtonElement>("#run-button");
 const runLabel = get<HTMLSpanElement>("#run-label");
 const runtimeLabel = get<HTMLSpanElement>("#runtime-label");
@@ -231,6 +302,7 @@ const abstractionOutput = get<HTMLOutputElement>("#abstraction-output");
 const autoAbstractionCheckbox = get<HTMLInputElement>("#auto-abstraction");
 const levelsSlider = get<HTMLInputElement>("#levels");
 const levelsOutput = get<HTMLOutputElement>("#levels-output");
+const grayscaleMethodSelect = get<HTMLSelectElement>("#grayscale-method");
 const toneSummary = get<HTMLOutputElement>("#tone-summary");
 const exposureSlider = get<HTMLInputElement>("#exposure");
 const exposureOutput = get<HTMLOutputElement>("#exposure-output");
@@ -257,6 +329,11 @@ const MAX_STUDY_HISTORY = 20;
 let studyHistory: Study[] = [];
 let studyIndex = -1;
 let snapshotRoot: SnapshotDirectory | undefined;
+let selectedRegionIds = new Set<number>();
+let selectedRegionSeeds = new Set<number>();
+let regionMultiSelectMode = false;
+let pendingMergeRequest: number | undefined;
+let regionMergeUndo: RegionMergeUndo | undefined;
 
 const setStatus = (message: string, kind: "info" | "success" | "error" = "info") => {
   statusMessage.textContent = message;
@@ -391,8 +468,9 @@ const updateSettings = () => {
 };
 
 const updateRunButton = () => {
-  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined || pendingEstimateId !== undefined;
+  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined || pendingEstimateId !== undefined || pendingMergeRequest !== undefined;
   if (pendingRequest !== undefined) runLabel.textContent = "Painting the values…";
+  else if (pendingMergeRequest !== undefined) runLabel.textContent = "Combining regions…";
   else if (pendingEstimateId !== undefined) runLabel.textContent = "Reading image detail…";
   else if (!runtimeReady) runLabel.textContent = "Preparing Python…";
   else if (!selectedFile) runLabel.textContent = "Choose an image first";
@@ -419,6 +497,11 @@ const setSelectedFile = (file: File) => {
     return;
   }
   selectedFile = file;
+  selectedRegionIds.clear();
+  selectedRegionSeeds.clear();
+  pendingMergeRequest = undefined;
+  selectedRegionIds.clear();
+  pendingMergeRequest = undefined;
   if (tonePreviewTimer !== undefined) window.clearTimeout(tonePreviewTimer);
   tonePreviewTimer = undefined;
   pendingTonePreviewId = undefined;
@@ -446,6 +529,10 @@ const setSelectedFile = (file: File) => {
   uploadHint.textContent = "Reference loaded · choose a study and run it";
   imageCaption.textContent = `${file.name} · ${(file.size / (1024 * 1024)).toFixed(2)} MB`;
   resultPreview.hidden = true;
+  resultStage.hidden = true;
+  regionTools.hidden = true;
+  resultStage.hidden = true;
+  regionTools.hidden = true;
   resultEmpty.hidden = false;
   downloadLink.hidden = true;
   setStatus(runtimeReady ? "Estimating a starting abstraction scale…" : "Image ready. Choose settings and create a study.");
@@ -460,6 +547,174 @@ const updateHistoryControls = () => {
   historyForward.disabled = studyIndex < 0 || studyIndex >= studyHistory.length - 1;
   historyCount.textContent = studyIndex < 0 ? `0 / ${MAX_STUDY_HISTORY}` : `${studyIndex + 1} / ${studyHistory.length}`;
   saveSnapshotButton.disabled = studyIndex < 0;
+};
+
+const isTouchSelectionAvailable = () =>
+  window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+
+const renderStudy = (study: Study) => {
+  resultPreview.src = study.url;
+  resultStage.hidden = false;
+  resultPreview.hidden = false;
+  resultEmpty.hidden = true;
+  downloadLink.href = study.url;
+  downloadLink.download = `${study.transform}-${study.createdAt.toISOString().replace(/[:.]/g, "-")}.png`;
+  downloadLink.hidden = false;
+
+  if (!study.regionLabels || !study.regionValues || !study.regionWidth || !study.regionHeight) {
+    selectedRegionIds.clear();
+    selectedRegionSeeds.clear();
+    regionMultiSelectMode = false;
+    regionTools.hidden = true;
+    regionOverlay.hidden = true;
+    return;
+  }
+
+  regionTools.hidden = false;
+  regionMultiSelectButton.hidden = !isTouchSelectionAvailable();
+  regionMultiSelectButton.textContent = regionMultiSelectMode ? "Done selecting" : "Add regions";
+  regionMultiSelectButton.setAttribute("aria-pressed", String(regionMultiSelectMode));
+  regionOverlay.hidden = false;
+  const aspect = study.regionWidth / study.regionHeight;
+  const maxWidth = Math.max(1, resultCard.clientWidth - 2);
+  resultStage.style.width = `${Math.min(maxWidth, 430 * aspect)}px`;
+  resultStage.style.aspectRatio = `${study.regionWidth} / ${study.regionHeight}`;
+  regionOverlay.width = study.regionWidth;
+  regionOverlay.height = study.regionHeight;
+  renderRegionOverlay(study);
+};
+
+const renderRegionOverlay = (study: Study) => {
+  if (!study.regionLabels || !study.regionWidth || !study.regionHeight) return;
+  const context = regionOverlay.getContext("2d");
+  if (!context || !study.regionValues) return;
+  const image = context.createImageData(study.regionWidth, study.regionHeight);
+  for (let index = 0; index < study.regionLabels.length; index += 1) {
+    if (!selectedRegionIds.has(study.regionLabels[index])) continue;
+    const pixel = index * 4;
+    image.data[pixel] = 234;
+    image.data[pixel + 1] = 151;
+    image.data[pixel + 2] = 82;
+    image.data[pixel + 3] = 112;
+  }
+  context.putImageData(image, 0, 0);
+  const selectedRegionsCount = selectedRegionSeeds.size;
+  regionSelectionLabel.textContent = selectedRegionsCount === 0
+    ? (regionMultiSelectMode
+      ? "Tap regions to add or remove them; similar values are included."
+      : "Click a region; ⌘/Ctrl-click adds seeds. Similar values are added globally.")
+    : `${selectedRegionsCount} seed${selectedRegionsCount === 1 ? "" : "s"} · ${selectedRegionIds.size} region${selectedRegionIds.size === 1 ? "" : "s"} selected`;
+  regionMultiSelectButton.textContent = regionMultiSelectMode ? "Done selecting" : "Add regions";
+  regionMultiSelectButton.setAttribute("aria-pressed", String(regionMultiSelectMode));
+  combineRegionsButton.disabled = selectedRegionIds.size < 2 || pendingMergeRequest !== undefined;
+  clearRegionSelectionButton.disabled = selectedRegionsCount === 0 || pendingMergeRequest !== undefined;
+  regionToleranceSlider.disabled = selectedRegionsCount === 0 || pendingMergeRequest !== undefined;
+  regionValueModeSelect.disabled = selectedRegionIds.size < 2 || pendingMergeRequest !== undefined;
+  undoRegionMergeButton.hidden = regionMergeUndo?.mergedStudy !== study;
+  undoRegionMergeButton.disabled = pendingMergeRequest !== undefined;
+};
+
+const updateRegionSelection = (study: Study) => {
+  if (!study.regionValues) return;
+  const tolerance = Number(regionToleranceSlider.value);
+  selectedRegionIds = new Set(selectedRegionSeeds);
+  if (selectedRegionSeeds.size === 0) return;
+  if (tolerance === 0) return;
+  const seedValues = [...selectedRegionSeeds]
+    .filter((regionId) => regionId >= 0 && regionId < study.regionValues!.length)
+    .map((regionId) => Number(study.regionValues![regionId]));
+  study.regionValues.forEach((value, regionId) => {
+    if (seedValues.some((seedValue) => Math.abs(Number(value) - seedValue) <= tolerance)) {
+      selectedRegionIds.add(regionId);
+    }
+  });
+};
+
+const selectRegionAt = (event: MouseEvent) => {
+  const study = studyHistory[studyIndex];
+  if (!study?.regionLabels || !study.regionWidth || !study.regionHeight || pendingMergeRequest !== undefined) return;
+  const bounds = regionOverlay.getBoundingClientRect();
+  const x = Math.min(study.regionWidth - 1, Math.max(0, Math.floor((event.clientX - bounds.left) / bounds.width * study.regionWidth)));
+  const y = Math.min(study.regionHeight - 1, Math.max(0, Math.floor((event.clientY - bounds.top) / bounds.height * study.regionHeight)));
+  const regionId = study.regionLabels[y * study.regionWidth + x];
+  if (regionMultiSelectMode || event.metaKey || event.ctrlKey) {
+    if (selectedRegionSeeds.has(regionId)) selectedRegionSeeds.delete(regionId);
+    else selectedRegionSeeds.add(regionId);
+  } else {
+    selectedRegionSeeds = selectedRegionSeeds.has(regionId) && selectedRegionSeeds.size === 1
+      ? new Set()
+      : new Set([regionId]);
+  }
+  updateRegionSelection(study);
+  renderRegionOverlay(study);
+};
+
+const appendStudy = (study: Study, completionMessage: string) => {
+  regionMergeUndo = undefined;
+  studyHistory.push(study);
+  if (studyHistory.length > MAX_STUDY_HISTORY) {
+    const removed = studyHistory.shift();
+    if (removed) URL.revokeObjectURL(removed.url);
+  }
+  studyIndex = studyHistory.length - 1;
+  selectedRegionIds.clear();
+  selectedRegionSeeds.clear();
+  renderStudy(study);
+  updateHistoryControls();
+  setStatus(completionMessage, "success");
+};
+
+const undoRegionMerge = () => {
+  if (!regionMergeUndo || studyHistory[studyIndex] !== regionMergeUndo.mergedStudy) return;
+  const previousIndex = studyHistory.indexOf(regionMergeUndo.previousStudy);
+  if (previousIndex < 0) return;
+  regionMergeUndo = undefined;
+  selectedRegionIds.clear();
+  selectedRegionSeeds.clear();
+  studyIndex = previousIndex;
+  renderStudy(studyHistory[studyIndex]);
+  updateHistoryControls();
+  updateRunButton();
+  setStatus("Region combination undone. The combined study remains in history.", "success");
+};
+
+const combineSelectedRegions = async () => {
+  const study = studyHistory[studyIndex];
+  if (
+    !study?.regionLabels ||
+    !study.regionValues ||
+    !study.regionWidth ||
+    !study.regionHeight ||
+    selectedRegionIds.size < 2 ||
+    pendingMergeRequest !== undefined
+  ) return;
+
+  const image = await study.blob.arrayBuffer();
+  const regionBuffer = new ArrayBuffer(study.regionLabels.length);
+  new Uint8Array(regionBuffer).set(study.regionLabels);
+  if (!study.regionValues) return;
+  const regionValuesBuffer = new ArrayBuffer(study.regionValues.length);
+  new Uint8Array(regionValuesBuffer).set(study.regionValues);
+  const id = nextRequestId++;
+  pendingMergeRequest = id;
+  updateRunButton();
+  renderRegionOverlay(study);
+  setStatus("Combining selected regions…");
+  worker.postMessage(
+    {
+      type: "merge-regions",
+      id,
+      image,
+      regions: regionBuffer,
+      regionValues: regionValuesBuffer,
+      regionWidth: study.regionWidth,
+      regionHeight: study.regionHeight,
+      selectedRegions: [...selectedRegionIds],
+      levels: study.levels,
+      valueMode: regionValueModeSelect.value as "mean" | "lighter" | "darker",
+    },
+    [image, regionBuffer, regionValuesBuffer],
+  );
 };
 
 const getSnapshotFolderName = (filename: string) => {
@@ -527,22 +782,43 @@ const saveStudySnapshot = async (study: Study) => {
   const sequence = String(snapshotNumber).padStart(4, "0");
   const imageName = `snapshot-${sequence}-${transformName}-${timestamp}.png`;
   const metadataName = `snapshot-${sequence}-${transformName}-${timestamp}.json`;
+  const regionLabelsName = study.regionLabels
+    ? `snapshot-${sequence}-${transformName}-${timestamp}.regions.bin`
+    : undefined;
+  const regionValuesName = study.regionValues
+    ? `snapshot-${sequence}-${transformName}-${timestamp}.values.bin`
+    : undefined;
   const metadata = {
     snapshotNumber,
     sourceImage: selectedFile.name,
     transform: study.transform,
     abstraction: study.abstraction,
     autoAbstraction: study.autoAbstraction,
+    ...(study.transform === "grayscale" ? { grayscaleMethod: study.grayscaleMethod } : {}),
     exposure: study.exposure,
     shadows: study.shadows,
     highlights: study.highlights,
     workingResolution: study.workingResolution,
+    ...(regionLabelsName && study.regionWidth && study.regionHeight
+      ? { regionLabels: regionLabelsName, regionWidth: study.regionWidth, regionHeight: study.regionHeight }
+      : {}),
+    ...(regionValuesName ? { regionValues: regionValuesName } : {}),
     ...(study.transform === "grayscale" ? { levels: study.levels } : { thresholdMethod: study.thresholdMethod }),
     createdAt: study.createdAt.toISOString(),
     image: imageName,
   };
 
   await writeSnapshotFile(paintingFolder, imageName, study.blob);
+  if (regionLabelsName && study.regionLabels) {
+    const regionBytes = new Uint8Array(study.regionLabels.length);
+    regionBytes.set(study.regionLabels);
+    await writeSnapshotFile(paintingFolder, regionLabelsName, new Blob([regionBytes.buffer]));
+  }
+  if (regionValuesName && study.regionValues) {
+    const regionValueBytes = new Uint8Array(study.regionValues.length);
+    regionValueBytes.set(study.regionValues);
+    await writeSnapshotFile(paintingFolder, regionValuesName, new Blob([regionValueBytes.buffer]));
+  }
   await writeSnapshotFile(paintingFolder, metadataName, JSON.stringify(metadata, null, 2));
   study.saved = true;
   study.snapshotNumber = snapshotNumber;
@@ -570,6 +846,7 @@ const showStudy = async (index: number) => {
   abstractionOutput.value = study.autoAbstraction ? `Auto · ${study.abstraction}×` : `${study.abstraction}×`;
   levelsSlider.value = String(study.levels);
   levelsOutput.value = String(study.levels);
+  grayscaleMethodSelect.value = study.grayscaleMethod;
   thresholdSelect.value = study.thresholdMethod;
   exposureSlider.value = String(study.exposure);
   shadowsSlider.value = String(study.shadows);
@@ -578,12 +855,9 @@ const showStudy = async (index: number) => {
   updateToneLabels();
   scheduleTonePreview();
   updateSettings();
-  resultPreview.src = study.url;
-  resultPreview.hidden = false;
-  resultEmpty.hidden = true;
-  downloadLink.href = study.url;
-  downloadLink.download = `${study.transform}-${study.createdAt.toISOString().replace(/[:.]/g, "-")}.png`;
-  downloadLink.hidden = false;
+  selectedRegionIds.clear();
+  selectedRegionSeeds.clear();
+  renderStudy(study);
   updateHistoryControls();
   setStatus(`${study.transform === "notan" ? "Notan" : "Grayscale"} study · ${study.abstraction}× abstraction`);
   await offerSnapshotSave(study);
@@ -593,6 +867,39 @@ fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
   if (file) setSelectedFile(file);
 });
+
+regionOverlay.addEventListener("click", selectRegionAt);
+regionMultiSelectButton.addEventListener("click", () => {
+  regionMultiSelectMode = !regionMultiSelectMode;
+  const study = studyHistory[studyIndex];
+  if (study?.regionLabels) renderRegionOverlay(study);
+});
+regionValueModeSelect.addEventListener("change", () => {
+  const activeStudy = studyHistory[studyIndex];
+  if (activeStudy?.regionLabels) renderRegionOverlay(activeStudy);
+});
+regionToleranceSlider.addEventListener("input", () => {
+  regionToleranceOutput.value = regionToleranceSlider.value;
+  const study = studyHistory[studyIndex];
+  if (!study) return;
+  updateRegionSelection(study);
+  renderRegionOverlay(study);
+});
+clearRegionSelectionButton.addEventListener("click", () => {
+  selectedRegionIds.clear();
+  selectedRegionSeeds.clear();
+  const study = studyHistory[studyIndex];
+  if (study) renderRegionOverlay(study);
+});
+undoRegionMergeButton.addEventListener("click", undoRegionMerge);
+combineRegionsButton.addEventListener("click", () => {
+  void combineSelectedRegions();
+});
+
+new ResizeObserver(() => {
+  const study = studyHistory[studyIndex];
+  if (study?.regionLabels) renderStudy(study);
+}).observe(resultCard);
 
 for (const eventName of ["dragenter", "dragover"] as const) {
   uploadCard.addEventListener(eventName, (event) => {
@@ -728,6 +1035,14 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
   }
 
   if (message.type === "error") {
+    if (message.id !== undefined && message.id === pendingMergeRequest) {
+      pendingMergeRequest = undefined;
+      const currentStudy = studyHistory[studyIndex];
+      if (currentStudy) renderRegionOverlay(currentStudy);
+      setStatus(`Could not combine regions: ${message.message}`, "error");
+      updateRunButton();
+      return;
+    }
     if (message.id !== undefined && message.id === pendingTonePreviewId) {
       pendingTonePreviewId = undefined;
       uploadHint.textContent = "Live preview failed · Create study uses the full image";
@@ -750,6 +1065,32 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     return;
   }
 
+  if (message.type === "merge-complete") {
+    if (message.id !== pendingMergeRequest) return;
+    pendingMergeRequest = undefined;
+    const previousStudy = studyHistory[studyIndex];
+    if (!previousStudy) return;
+    const blob = new Blob([message.image], { type: "image/png" });
+    const mergedStudy: Study = {
+      ...previousStudy,
+      blob,
+      url: URL.createObjectURL(blob),
+      regionLabels: new Uint8Array(message.regions),
+      regionValues: new Uint8Array(message.regionValues),
+      regionWidth: message.regionWidth,
+      regionHeight: message.regionHeight,
+      createdAt: new Date(),
+      saved: false,
+      snapshotNumber: undefined,
+    };
+    appendStudy(mergedStudy, "Regions combined into a new grayscale study.");
+    regionMergeUndo = { previousStudy, mergedStudy };
+    renderRegionOverlay(mergedStudy);
+    updateRunButton();
+    await offerSnapshotSave(mergedStudy);
+    return;
+  }
+
   if (message.id !== pendingRequest) return;
   pendingRequest = undefined;
   const blob = new Blob([message.image], { type: "image/png" });
@@ -760,30 +1101,24 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     abstraction: Number(abstractionSlider.value),
     autoAbstraction: autoAbstractionCheckbox.checked,
     levels: Number(levelsSlider.value),
+    grayscaleMethod: grayscaleMethodSelect.value as Study["grayscaleMethod"],
     thresholdMethod: thresholdSelect.value,
     exposure: Number(exposureSlider.value),
     shadows: Number(shadowsSlider.value),
     highlights: Number(highlightsSlider.value),
     workingResolution: Number(workingResolutionSelect.value),
+    ...(message.regions && message.regionWidth && message.regionHeight
+      ? {
+          regionLabels: new Uint8Array(message.regions),
+          ...(message.regionValues ? { regionValues: new Uint8Array(message.regionValues) } : {}),
+          regionWidth: message.regionWidth,
+          regionHeight: message.regionHeight,
+        }
+      : {}),
     createdAt: new Date(),
     saved: false,
   };
-  // History is an append-only sequence for the current image. Creating a
-  // study while viewing an older one must not discard later studies.
-  studyHistory.push(study);
-  if (studyHistory.length > MAX_STUDY_HISTORY) {
-    const removed = studyHistory.shift();
-    if (removed) URL.revokeObjectURL(removed.url);
-  }
-  studyIndex = studyHistory.length - 1;
-  resultPreview.src = study.url;
-  resultPreview.hidden = false;
-  resultEmpty.hidden = true;
-  downloadLink.href = study.url;
-  downloadLink.download = `${study.transform}-${study.createdAt.toISOString().replace(/[:.]/g, "-")}.png`;
-  downloadLink.hidden = false;
-  updateHistoryControls();
-  setStatus(`Study complete in ${message.transformMs} ms.`, "success");
+  appendStudy(study, `Study complete in ${message.transformMs} ms.`);
   await offerSnapshotSave(study);
   updateRunButton();
 });
@@ -810,6 +1145,7 @@ runButton.addEventListener("click", async () => {
       transform: selectedTransform(),
       abstraction: Number(abstractionSlider.value),
       levels: Number(levelsSlider.value),
+      grayscaleMethod: grayscaleMethodSelect.value,
       thresholdMethod: thresholdSelect.value,
       exposure: Number(exposureSlider.value),
       shadows: Number(shadowsSlider.value),
