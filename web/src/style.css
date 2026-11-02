@@ -88,7 +88,13 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.45px; }
 .result-card .preview-image { display: block; width: 100%; height: 100%; max-height: 430px; object-fit: contain; }
 .region-overlay { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; image-rendering: pixelated; touch-action: manipulation; }
 .region-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 9px 2px 0; color: #78827b; font-size: 10px; }
-.region-tools > div { display: flex; flex: none; gap: 7px; }
+.region-tools > div { display: flex; min-width: 0; gap: 7px; }
+.region-selection-settings { flex: 1 1 220px; align-items: center; justify-content: space-between; }
+.region-actions { flex: 1 1 310px; flex-wrap: wrap; justify-content: flex-end; }
+.region-tolerance-control { display: grid; min-width: 120px; grid-template-columns: auto auto; align-items: center; column-gap: 4px; white-space: nowrap; }
+.region-tolerance-control input { grid-column: 1 / -1; margin: 5px 0 0; }
+.region-value-control { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.region-value-control select { min-height: 30px; border: 1px solid #dfe4da; border-radius: 7px; background: #fffefa; color: #42604c; font-size: 10px; }
 .region-action { min-height: 30px; padding: 0 10px; border: 1px solid #dfe4da; border-radius: 7px; background: #fffefa; color: #42604c; cursor: pointer; font-size: 10px; font-weight: 600; }
 .region-action:disabled { color: #adb3aa; cursor: not-allowed; }
 .region-multi-select[aria-pressed="true"] { border-color: #587d67; background: #eff3eb; color: #365b47; }
@@ -162,5 +168,16 @@ input[type="range"] { width: 100%; height: 4px; margin: 8px 0; accent-color: var
   .controls-card { grid-row: 1; }
   .study-column { grid-row: 2; }
   .upload-card { min-height: 210px; }
+  .region-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .region-selection-settings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(125px, 42%); gap: 10px; align-items: center; }
+  .region-selection-settings > span { line-height: 1.4; }
+  .region-actions { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .region-actions > * { min-width: 0; }
+  .region-action { padding: 0 7px; }
+  .region-value-control { justify-content: center; font-size: 9px; }
+  .region-value-control select { min-width: 0; max-width: 100%; padding: 0 4px; }
+  .region-tolerance-control { min-width: 0; font-size: 9px; }
+  .region-tolerance-control input { width: 100%; }
+  .region-multi-select[hidden] { display: none !important; }
   .page-footer { gap: 12px; font-size: 7px; }
 }

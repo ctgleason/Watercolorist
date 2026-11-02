@@ -148,7 +148,7 @@ app.innerHTML = `
               <span id="region-selection-label">Click a grayscale region to select it.</span>
               <label class="region-tolerance-control" for="region-tolerance">
                 Similar values ±<output id="region-tolerance-output" for="region-tolerance">0</output>
-                <input id="region-tolerance" type="range" min="0" max="64" step="1" value="0" />
+                <input id="region-tolerance" type="range" min="0" max="100" step="1" value="0" />
               </label>
             </div>
             <div class="region-actions">
@@ -601,8 +601,8 @@ const renderRegionOverlay = (study: Study) => {
   const selectedRegionsCount = selectedRegionSeeds.size;
   regionSelectionLabel.textContent = selectedRegionsCount === 0
     ? (regionMultiSelectMode
-      ? "Tap regions to add or remove them; similar values are included."
-      : "Click a region; ⌘/Ctrl-click adds seeds. Similar values are added globally.")
+      ? "Tap regions to add or remove seeds; nearby similar regions join."
+      : "Click a region; ⌘/Ctrl-click adds seeds. Similar regions join only when touching.")
     : `${selectedRegionsCount} seed${selectedRegionsCount === 1 ? "" : "s"} · ${selectedRegionIds.size} region${selectedRegionIds.size === 1 ? "" : "s"} selected`;
   regionMultiSelectButton.textContent = regionMultiSelectMode ? "Done selecting" : "Add regions";
   regionMultiSelectButton.setAttribute("aria-pressed", String(regionMultiSelectMode));
@@ -614,20 +614,52 @@ const renderRegionOverlay = (study: Study) => {
   undoRegionMergeButton.disabled = pendingMergeRequest !== undefined;
 };
 
+const regionTolerance = () => Math.round(64 * (Number(regionToleranceSlider.value) / 100) ** 2);
+
 const updateRegionSelection = (study: Study) => {
-  if (!study.regionValues) return;
-  const tolerance = Number(regionToleranceSlider.value);
+  if (!study.regionValues || !study.regionLabels || !study.regionWidth || !study.regionHeight) return;
+  const tolerance = regionTolerance();
   selectedRegionIds = new Set(selectedRegionSeeds);
-  if (selectedRegionSeeds.size === 0) return;
-  if (tolerance === 0) return;
+  if (selectedRegionSeeds.size === 0 || tolerance === 0) return;
+
+  const adjacency = Array.from({ length: study.regionValues.length }, () => new Set<number>());
+  const { regionLabels: labels, regionWidth: width, regionHeight: height } = study;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const current = labels[index];
+      if (x + 1 < width) {
+        const right = labels[index + 1];
+        if (current !== right) {
+          adjacency[current].add(right);
+          adjacency[right].add(current);
+        }
+      }
+      if (y + 1 < height) {
+        const below = labels[index + width];
+        if (current !== below) {
+          adjacency[current].add(below);
+          adjacency[below].add(current);
+        }
+      }
+    }
+  }
+
   const seedValues = [...selectedRegionSeeds]
     .filter((regionId) => regionId >= 0 && regionId < study.regionValues!.length)
     .map((regionId) => Number(study.regionValues![regionId]));
-  study.regionValues.forEach((value, regionId) => {
-    if (seedValues.some((seedValue) => Math.abs(Number(value) - seedValue) <= tolerance)) {
-      selectedRegionIds.add(regionId);
+  const queue = [...selectedRegionSeeds];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const regionId = queue[cursor];
+    for (const neighbor of adjacency[regionId] ?? []) {
+      if (selectedRegionIds.has(neighbor)) continue;
+      const value = Number(study.regionValues[neighbor]);
+      if (seedValues.some((seedValue) => Math.abs(value - seedValue) <= tolerance)) {
+        selectedRegionIds.add(neighbor);
+        queue.push(neighbor);
+      }
     }
-  });
+  }
 };
 
 const selectRegionAt = (event: MouseEvent) => {
@@ -710,7 +742,7 @@ const combineSelectedRegions = async () => {
       regionWidth: study.regionWidth,
       regionHeight: study.regionHeight,
       selectedRegions: [...selectedRegionIds],
-      levels: study.levels,
+      levels: study.transform === "notan" ? 2 : study.levels,
       valueMode: regionValueModeSelect.value as "mean" | "lighter" | "darker",
     },
     [image, regionBuffer, regionValuesBuffer],
@@ -879,7 +911,7 @@ regionValueModeSelect.addEventListener("change", () => {
   if (activeStudy?.regionLabels) renderRegionOverlay(activeStudy);
 });
 regionToleranceSlider.addEventListener("input", () => {
-  regionToleranceOutput.value = regionToleranceSlider.value;
+  regionToleranceOutput.value = String(regionTolerance());
   const study = studyHistory[studyIndex];
   if (!study) return;
   updateRegionSelection(study);
@@ -896,9 +928,14 @@ combineRegionsButton.addEventListener("click", () => {
   void combineSelectedRegions();
 });
 
+let regionResizeFrame: number | undefined;
 new ResizeObserver(() => {
-  const study = studyHistory[studyIndex];
-  if (study?.regionLabels) renderStudy(study);
+  if (regionResizeFrame !== undefined) return;
+  regionResizeFrame = requestAnimationFrame(() => {
+    regionResizeFrame = undefined;
+    const study = studyHistory[studyIndex];
+    if (study?.regionLabels) renderStudy(study);
+  });
 }).observe(resultCard);
 
 for (const eventName of ["dragenter", "dragover"] as const) {

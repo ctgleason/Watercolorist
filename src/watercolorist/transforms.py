@@ -220,6 +220,37 @@ def _adaptive_region_grayscale(
     )
 
 
+def _region_map_for_grayscale(
+    image: Image.Image,
+    grayscale: Image.Image,
+    levels: int,
+    abstraction: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create selectable spatial regions for any grayscale mapping method."""
+    color_image = load_rgb(image)
+    grayscale_image = grayscale.convert("L")
+    analysis_color = color_image.copy()
+    analysis_color.thumbnail((512, 512), Image.Resampling.BOX)
+    analysis_gray = grayscale_image.resize(analysis_color.size, Image.Resampling.NEAREST)
+    color = np.asarray(analysis_color, dtype=np.uint8)
+    gray = np.asarray(analysis_gray, dtype=np.uint8)
+
+    target_regions = max(24, min(200, round(600 / max(1.0, abstraction**0.5))))
+    region_spacing = max(2, round(np.sqrt(color.shape[0] * color.shape[1] / target_regions)))
+    labels = _slic_region_labels(color, region_spacing)
+    flat_labels = labels.ravel()
+    region_count = int(flat_labels.max()) + 1
+    counts = np.bincount(flat_labels, minlength=region_count).astype(np.float64)
+    means = np.bincount(
+        flat_labels,
+        weights=gray.ravel().astype(np.float64),
+        minlength=region_count,
+    ) / np.maximum(counts, 1.0)
+    palette = np.rint(np.arange(levels, dtype=np.float64) * 255 / (levels - 1)).astype(np.uint8)
+    value_indices = np.abs(means[:, np.newaxis] - palette[np.newaxis, :]).argmin(axis=1)
+    return labels.astype(np.uint8), palette[value_indices].astype(np.uint8)
+
+
 def _grayscale_study(
     image: Image.Image,
     levels: int,
@@ -237,16 +268,12 @@ def _grayscale_study(
     source = adjust_tone(source, exposure, shadows, highlights)
     if grayscale_method == "adaptive-regions":
         result, region_labels, region_values = _adaptive_region_grayscale(source, levels, abstraction)
-        labels_image = Image.fromarray(region_labels, mode="L")
-        full_size_labels = np.asarray(
-            labels_image.resize(original_size, Image.Resampling.NEAREST),
-            dtype=np.uint8,
-        ).copy()
-        return _restore_output_size(result, original_size), full_size_labels, region_values
+        return _restore_output_size(result, original_size), region_labels, region_values
 
     grayscale = np.asarray(ImageOps.grayscale(source), dtype=np.uint8)
     result = Image.fromarray(_quantize_values(grayscale, levels))
-    return _restore_output_size(result, original_size), None, None
+    region_labels, region_values = _region_map_for_grayscale(source, result, levels, abstraction)
+    return _restore_output_size(result, original_size), region_labels, region_values
 
 
 def _otsu_threshold(values: np.ndarray) -> int:

@@ -266,7 +266,7 @@ with open(${JSON.stringify(outputRegionValuesPath)}, "wb") as _region_values_fil
     cleanupPaths.push(outputPath);
     await pyodide.runPythonAsync(`
 from PIL import Image
-from watercolorist.transforms import grayscale_study_with_regions, notan_study
+from watercolorist.transforms import _region_map_for_grayscale, grayscale_study_with_regions, notan_study
 
 _source = Image.open(${JSON.stringify(inputPath)}).convert("RGB")
 _region_labels = None
@@ -281,6 +281,9 @@ if _watercolorist_transform == "notan":
         highlights=_watercolorist_highlights,
         working_resolution=_watercolorist_working_resolution,
     )
+    _region_labels, _region_values = _region_map_for_grayscale(
+        _source, _study, 2, _watercolorist_abstraction
+    )
 else:
     _study, _region_labels, _region_values = grayscale_study_with_regions(
         _source,
@@ -293,7 +296,7 @@ else:
         working_resolution=_watercolorist_working_resolution,
     )
 _study.save(${JSON.stringify(outputPath)}, format="PNG")
-if _watercolorist_transform == "grayscale" and _region_labels is not None:
+if _region_labels is not None:
     _region_image = Image.fromarray(_region_labels, mode="L")
     _region_image.thumbnail((512, 512), Image.Resampling.NEAREST)
     _region_width, _region_height = _region_image.size
@@ -308,8 +311,7 @@ else:
     const output = pyodide.FS.readFile(outputPath);
     const image = new ArrayBuffer(output.byteLength);
     new Uint8Array(image).set(output);
-    const hasRegions = data.transform === "grayscale" &&
-      pyodide.runPython("_region_labels is not None") as boolean;
+    const hasRegions = pyodide.runPython("_region_labels is not None") as boolean;
     let regions: ArrayBuffer | undefined;
     let regionValues: ArrayBuffer | undefined;
     let regionWidth = 0;

@@ -92,6 +92,27 @@ def test_adaptive_grayscale_returns_source_sized_region_labels() -> None:
     assert result.size == image.size
 
 
+def test_even_grayscale_returns_editable_region_maps() -> None:
+    image = Image.new("RGB", (64, 32))
+    image.putdata([
+        (35, 35, 35) if x < 32 else (220, 220, 220)
+        for _y in range(32)
+        for x in range(64)
+    ])
+
+    result, region_labels, region_values = grayscale_study_with_regions(
+        image,
+        levels=2,
+        grayscale_method="even",
+    )
+
+    assert region_labels is not None
+    assert region_values is not None
+    assert region_labels.shape == (32, 64)
+    assert int(region_labels[16, 16]) != int(region_labels[16, 48])
+    assert result.getpixel((16, 16)) != result.getpixel((48, 16))
+
+
 def test_combining_regions_assigns_one_shared_value_and_label() -> None:
     image = Image.new("RGB", (64, 32))
     image.putdata([
