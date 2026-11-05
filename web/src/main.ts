@@ -18,6 +18,13 @@ type RegionPaintLayer = {
   washStrength: number;
 };
 
+type ZoneField = "abstraction" | "exposure" | "shadows" | "highlights" | "blend";
+
+type ProcessingZone = Record<ZoneField, number> & {
+  id: string;
+  shapes: { x: number; y: number }[][];
+};
+
 type Study = {
   blob: Blob;
   url: string;
@@ -37,6 +44,7 @@ type Study = {
   regionHeight?: number;
   /** Ordered paint layers leave room for future user-drawn masks that overlap. */
   paintLayers?: RegionPaintLayer[];
+  zones?: ProcessingZone[];
   palettePaintIds: string[];
   paletteLimit: number;
   createdAt: Date;
@@ -114,7 +122,10 @@ app.innerHTML = `
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3C12 9 7 14.2 7 20a9 9 0 0 0 18 0c0-5.8-5-11-9-17Z" fill="currentColor"/><path d="M11.5 21.5c.6 2.4 2.2 3.8 4.7 4.2" stroke="#F6F4EE" stroke-width="1.7" stroke-linecap="round"/></svg></span>
         <span>watercolorist</span>
       </a>
-      <span class="version-badge" title="Application version and source commit">v${__APP_VERSION__} · ${__APP_COMMIT__}</span>
+      <div class="topbar-meta">
+        <span class="version-badge" title="Application version and source commit">v${__APP_VERSION__} · ${__APP_COMMIT__}</span>
+        <button class="guide-button" id="open-guide" type="button" aria-haspopup="dialog">Guide</button>
+      </div>
       <div class="runtime-pill"><span class="runtime-dot" id="runtime-dot"></span><span id="runtime-label">Starting Python worker</span></div>
     </header>
 
@@ -131,7 +142,17 @@ app.innerHTML = `
             <span class="upload-title" id="upload-title">Choose a reference image</span>
             <span class="upload-hint" id="upload-hint">or drop an image here</span>
             <img class="preview-image" id="source-preview" alt="Selected reference image" hidden />
+            <canvas class="zone-overlay" id="zone-overlay" aria-label="Draw processing zones on the reference image" hidden></canvas>
           </label>
+          <div class="zone-controls" id="zone-controls" hidden>
+            <div class="zone-heading"><strong>Processing zones</strong><span>Draw around an area of your original photo to give it its own abstraction and tone. Everything outside the zones uses the study settings.</span></div>
+            <div class="zone-actions">
+              <button class="region-action" id="draw-zone" type="button" aria-pressed="false">Draw zone</button>
+              <button class="region-action region-paint-apply" id="apply-zones" type="button" disabled>Create study with zones</button>
+              <button class="region-action" id="clear-zones" type="button" disabled>Clear zones</button>
+            </div>
+            <div class="zone-list" id="zone-list"></div>
+          </div>
 
           <div class="section-heading result-heading">
             <div><p class="eyebrow">02 / Study</p><h2 id="result-title">Your study</h2></div>
@@ -314,6 +335,49 @@ app.innerHTML = `
       </section>
 
       <footer class="page-footer"><span>WATERCOLORIST · EARLY FEASIBILITY BUILD</span><span id="performance-note">Python algorithms · browser worker</span></footer>
+      <dialog class="guide-dialog" id="guide-dialog" aria-labelledby="guide-title">
+        <div class="guide-header"><h2 id="guide-title">Quick guide</h2><button class="guide-close" id="close-guide" type="button" aria-label="Close guide">×</button></div>
+        <div class="guide-body">
+          <h3>1 · Make a study</h3>
+          <ol>
+            <li>Choose a reference image (JPG, PNG, or WEBP).</li>
+            <li>Pick <strong>Notan</strong> (two values) or <strong>Grayscale</strong> (several values). <strong>Abstraction scale</strong> controls how broad the shapes are; the app suggests a starting value.</li>
+            <li>Optional: open <strong>Tone adjustments</strong> for exposure, shadows, and highlights. The reference preview updates live.</li>
+            <li>Tap <strong>Create study</strong>. Use the ← → buttons to browse your last 20 studies.</li>
+          </ol>
+          <h3>2 · Select and combine regions</h3>
+          <ul>
+            <li>Tap a region to select it. Command/Ctrl-click adds more; on touch screens turn on <strong>Add regions</strong>.</li>
+            <li><strong>Similar values ±</strong> grows each selection into touching regions with a similar gray value.</li>
+            <li><strong>Combine regions</strong> merges the selection into one value (average, lighter, or darker). <strong>Undo combine</strong> returns to the previous study.</li>
+          </ul>
+          <h3>3 · Processing zones</h3>
+          <ul>
+            <li>Use zones when part of the photo needs different abstraction or tone, such as a detailed focal point or a dark foreground. You don't need a study first: zones are drawn on your original photo.</li>
+            <li>Under the photo, tap <strong>Draw zone</strong> and trace around an area. Each closed stroke becomes a numbered zone (Z1, Z2…); tap <strong>Finish zone</strong> when done.</li>
+            <li>Set each zone's abstraction, exposure, shadows, and highlights. Areas outside every zone use the main study settings. Later zones sit on top of earlier ones.</li>
+            <li><strong>Edge blend</strong> softens the transition across a zone's outline, split evenly on both sides, so settings don't change abruptly. Set it to Off for a hard edge; higher values widen the transition.</li>
+            <li>Tap <strong>Create study with zones</strong> (or <strong>Create study</strong>). The original photo is processed once for the main settings and once per zone, then combined. <strong>Match study</strong> resets a zone to the main settings; <strong>Delete</strong> or <strong>Clear zones</strong> removes them.</li>
+          </ul>
+          <h3>4 · Palette and color</h3>
+          <ul>
+            <li>In <strong>Watercolor palette</strong>, search or filter the catalog and tick the paints you own. Your inventory is saved in this browser. Tap a swatch to set your own display color.</li>
+            <li>Tick <strong>Use</strong> on the paints for this painting, set a maximum, or tap <strong>Suggest limited palette</strong> to let the app choose.</li>
+            <li>Select a region, choose a paint and wash strength, then <strong>Fill selected</strong>. Or tap <strong>Auto-assign palette</strong> to match regions with single paints or two-paint mixes. Select a region to see its recipe.</li>
+            <li><strong>Draw shape</strong> then <strong>Fill drawn shape</strong> paints a freehand area. Fills are layered, so later fills overlap earlier ones.</li>
+          </ul>
+          <h3>5 · Save your work</h3>
+          <ul>
+            <li><strong>Download PNG</strong> saves the current view, including color fills.</li>
+            <li><strong>Save snapshot</strong> writes the image, settings, zones, palette, and region data to a folder you choose. It needs a browser with folder access, usually desktop Chrome or Edge. Snapshots can't be reopened yet.</li>
+          </ul>
+          <h3>Good to know</h3>
+          <ul>
+            <li>Swatches and mixes are approximate screen estimates, not measured paint colors.</li>
+            <li>Install the app from your browser menu to use it offline after the first visit.</li>
+          </ul>
+        </div>
+      </dialog>
     </main>
   </div>
 `;
@@ -399,6 +463,15 @@ const paintResults = get<HTMLDivElement>("#paint-results");
 const paintResultsSummary = get<HTMLParagraphElement>("#paint-results-summary");
 const selectedPaintsElement = get<HTMLDivElement>("#selected-paints");
 const paletteCountOutput = get<HTMLOutputElement>("#palette-count");
+const drawZoneButton = get<HTMLButtonElement>("#draw-zone");
+const zoneControls = get<HTMLDivElement>("#zone-controls");
+const zoneOverlay = get<HTMLCanvasElement>("#zone-overlay");
+const applyZonesButton = get<HTMLButtonElement>("#apply-zones");
+const clearZonesButton = get<HTMLButtonElement>("#clear-zones");
+const zoneList = get<HTMLDivElement>("#zone-list");
+const guideDialog = get<HTMLDialogElement>("#guide-dialog");
+const openGuideButton = get<HTMLButtonElement>("#open-guide");
+const closeGuideButton = get<HTMLButtonElement>("#close-guide");
 const paintingPaletteLimitInput = get<HTMLInputElement>("#painting-palette-limit");
 const autoSelectPaletteButton = get<HTMLButtonElement>("#auto-select-palette");
 const paintingPaletteSummary = get<HTMLParagraphElement>("#painting-palette-summary");
@@ -425,6 +498,14 @@ let snapshotRoot: SnapshotDirectory | undefined;
 let selectedRegionIds = new Set<number>();
 let selectedRegionSeeds = new Set<number>();
 let drawShapeMode = false;
+let zoneDrawMode = false;
+let activeZonePoints: { x: number; y: number }[] = [];
+let processingZones: ProcessingZone[] = [];
+let zoneRunActive = false;
+const transformWaiters = new Map<number, {
+  resolve: (message: Extract<WorkerReply, { type: "complete" }>) => void;
+  reject: (error: Error) => void;
+}>();
 let activeShapePoints: { x: number; y: number }[] = [];
 let pendingShapes: { x: number; y: number }[][] = [];
 let regionMultiSelectMode = false;
@@ -1283,13 +1364,18 @@ const updateSettings = () => {
 };
 
 const updateRunButton = () => {
-  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined || pendingEstimateId !== undefined || pendingMergeRequest !== undefined;
-  if (pendingRequest !== undefined) runLabel.textContent = "Painting the values…";
+  runButton.disabled = !runtimeReady || !selectedFile || pendingRequest !== undefined || pendingEstimateId !== undefined || pendingMergeRequest !== undefined || zoneRunActive;
+  if (zoneRunActive) runLabel.textContent = "Painting the zones…";
+  else if (pendingRequest !== undefined) runLabel.textContent = "Painting the values…";
   else if (pendingMergeRequest !== undefined) runLabel.textContent = "Combining regions…";
   else if (pendingEstimateId !== undefined) runLabel.textContent = "Reading image detail…";
   else if (!runtimeReady) runLabel.textContent = "Preparing Python…";
   else if (!selectedFile) runLabel.textContent = "Choose an image first";
-  else runLabel.textContent = "Create study";
+  else runLabel.textContent = processingZones.length
+    ? `Create study · ${processingZones.length} ${processingZones.length === 1 ? "zone" : "zones"}`
+    : "Create study";
+  applyZonesButton.disabled = runButton.disabled || processingZones.length === 0;
+  clearZonesButton.disabled = processingZones.length === 0 || zoneRunActive;
 };
 
 const requestAbstractionEstimate = async () => {
@@ -1312,6 +1398,11 @@ const setSelectedFile = (file: File) => {
     return;
   }
   selectedFile = file;
+  processingZones = [];
+  drawShapeMode = false;
+  zoneDrawMode = false;
+  activeZonePoints = [];
+  renderZoneList();
   paintingPaletteCustomized = false;
   syncPaintingPaletteToInventory();
   renderPaintCatalog();
@@ -1345,6 +1436,7 @@ const setSelectedFile = (file: File) => {
   sourceUrl = URL.createObjectURL(file);
   sourcePreview.src = sourceUrl;
   sourcePreview.hidden = false;
+  zoneControls.hidden = false;
   uploadTitle.textContent = file.name;
   uploadHint.textContent = "Reference loaded · choose a study and run it";
   imageCaption.textContent = `${file.name} · ${(file.size / (1024 * 1024)).toFixed(2)} MB`;
@@ -1447,23 +1539,38 @@ const renderRegionOverlay = (study: Study) => {
     image.data[pixel + 2] = 82;
     image.data[pixel + 3] = 112;
   }
-  const drawPath = (points: { x: number; y: number }[], close = false) => {
+  const drawPath = (points: { x: number; y: number }[], close = false, stroke = "#315c45", fill = "rgb(88 125 103 / 18%)") => {
     if (points.length < 2) return;
     context.beginPath();
     context.moveTo(points[0].x * study.regionWidth!, points[0].y * study.regionHeight!);
     for (const point of points.slice(1)) context.lineTo(point.x * study.regionWidth!, point.y * study.regionHeight!);
     if (close) context.closePath();
-    context.strokeStyle = "#315c45";
+    context.strokeStyle = stroke;
     context.lineWidth = Math.max(1.5, Math.min(study.regionWidth!, study.regionHeight!) / 170);
     context.setLineDash([5, 3]);
     context.stroke();
     context.setLineDash([]);
     if (close) {
-      context.fillStyle = "rgb(88 125 103 / 18%)";
+      context.fillStyle = fill;
       context.fill();
     }
   };
   context.putImageData(image, 0, 0);
+  processingZones.forEach((zone, zoneIndex) => {
+    for (const shape of zone.shapes) drawPath(shape, true, "#a35d2b", "rgb(189 120 70 / 14%)");
+    const outline = zone.shapes[0];
+    if (!outline?.length) return;
+    const centerX = outline.reduce((sum, point) => sum + point.x, 0) / outline.length * study.regionWidth!;
+    const centerY = outline.reduce((sum, point) => sum + point.y, 0) / outline.length * study.regionHeight!;
+    context.font = `700 ${Math.max(10, study.regionWidth! / 20)}px sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.lineWidth = 3;
+    context.strokeStyle = "rgb(255 254 250 / 90%)";
+    context.strokeText(`Z${zoneIndex + 1}`, centerX, centerY);
+    context.fillStyle = "#7a4219";
+    context.fillText(`Z${zoneIndex + 1}`, centerX, centerY);
+  });
   for (const shape of pendingShapes) drawPath(shape, true);
   if (activeShapePoints.length > 1) drawPath(activeShapePoints);
   const selectedRegionsCount = selectedRegionSeeds.size;
@@ -1570,6 +1677,362 @@ const selectRegionAt = (event: MouseEvent) => {
   renderRegionOverlay(study);
 };
 
+const zoneSliderSpecs = [
+  { field: "abstraction", label: "Abstraction", min: 1, max: 24, step: 1 },
+  { field: "exposure", label: "Exposure", min: -2, max: 2, step: 0.1 },
+  { field: "shadows", label: "Shadows", min: -1, max: 1, step: 0.05 },
+  { field: "highlights", label: "Highlights", min: -1, max: 1, step: 0.05 },
+  { field: "blend", label: "Edge blend", min: 0, max: 20, step: 1 },
+] as const;
+
+const DEFAULT_ZONE_BLEND = 4;
+
+const formatZoneValue = (field: ZoneField, value: number) => field === "abstraction"
+  ? `${value}\u00d7`
+  : field === "blend"
+    ? (value === 0 ? "Off" : `${value}%`)
+    : field === "exposure"
+      ? `${value.toFixed(1)} EV`
+      : `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+
+const cloneZones = (zones: ProcessingZone[]): ProcessingZone[] =>
+  zones.map((zone) => ({ ...zone, shapes: zone.shapes.map((shape) => shape.map((point) => ({ ...point }))) }));
+
+const currentStudySettingsForZone = () => ({
+  abstraction: Number(abstractionSlider.value),
+  exposure: Number(exposureSlider.value),
+  shadows: Number(shadowsSlider.value),
+  highlights: Number(highlightsSlider.value),
+});
+
+const renderZoneOverlay = () => {
+  const { naturalWidth, naturalHeight } = sourcePreview;
+  if (sourcePreview.hidden || !naturalWidth || !naturalHeight) {
+    zoneOverlay.hidden = true;
+    return;
+  }
+  // The photo is letterboxed inside the card, so the canvas must cover only the visible image.
+  const boxWidth = uploadCard.clientWidth;
+  const boxHeight = uploadCard.clientHeight;
+  const scale = Math.min(boxWidth / naturalWidth, boxHeight / naturalHeight);
+  const width = naturalWidth * scale;
+  const height = naturalHeight * scale;
+  const ratio = window.devicePixelRatio || 1;
+  zoneOverlay.hidden = false;
+  zoneOverlay.style.left = `${(boxWidth - width) / 2}px`;
+  zoneOverlay.style.top = `${(boxHeight - height) / 2}px`;
+  zoneOverlay.style.width = `${width}px`;
+  zoneOverlay.style.height = `${height}px`;
+  zoneOverlay.width = Math.max(1, Math.round(width * ratio));
+  zoneOverlay.height = Math.max(1, Math.round(height * ratio));
+  zoneOverlay.classList.toggle("is-drawing", zoneDrawMode);
+  drawZoneButton.setAttribute("aria-pressed", String(zoneDrawMode));
+  drawZoneButton.textContent = zoneDrawMode ? "Finish zone" : "Draw zone";
+  const context = zoneOverlay.getContext("2d");
+  if (!context) return;
+  const trace = (points: { x: number; y: number }[], close: boolean) => {
+    context.beginPath();
+    context.moveTo(points[0].x * zoneOverlay.width, points[0].y * zoneOverlay.height);
+    for (const point of points.slice(1)) context.lineTo(point.x * zoneOverlay.width, point.y * zoneOverlay.height);
+    if (close) context.closePath();
+  };
+  context.lineWidth = 2 * ratio;
+  context.setLineDash([6 * ratio, 4 * ratio]);
+  processingZones.forEach((zone, zoneIndex) => {
+    for (const shape of zone.shapes) {
+      trace(shape, true);
+      context.fillStyle = "rgb(189 120 70 / 22%)";
+      context.fill();
+      context.strokeStyle = "#a35d2b";
+      context.stroke();
+    }
+    const outline = zone.shapes[0];
+    if (!outline?.length) return;
+    const centerX = outline.reduce((sum, point) => sum + point.x, 0) / outline.length * zoneOverlay.width;
+    const centerY = outline.reduce((sum, point) => sum + point.y, 0) / outline.length * zoneOverlay.height;
+    context.setLineDash([]);
+    context.font = `700 ${13 * ratio}px sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.lineWidth = 3 * ratio;
+    context.strokeStyle = "rgb(255 254 250 / 92%)";
+    context.strokeText(`Z${zoneIndex + 1}`, centerX, centerY);
+    context.fillStyle = "#7a4219";
+    context.fillText(`Z${zoneIndex + 1}`, centerX, centerY);
+    context.lineWidth = 2 * ratio;
+    context.setLineDash([6 * ratio, 4 * ratio]);
+  });
+  if (activeZonePoints.length > 1) {
+    trace(activeZonePoints, false);
+    context.strokeStyle = "#315c45";
+    context.stroke();
+  }
+  context.setLineDash([]);
+};
+
+const refreshZoneOverlay = () => {
+  renderZoneOverlay();
+  const study = activeStudy();
+  if (study) renderRegionOverlay(study);
+};
+
+const renderZoneList = () => {
+  if (processingZones.length === 0) {
+    zoneList.innerHTML = '<p class="zone-empty">No zones yet. Choose Draw zone, then trace around an area.</p>';
+  } else {
+    zoneList.innerHTML = processingZones.map((zone, index) => `
+      <div class="zone-card" data-zone-id="${zone.id}">
+        <div class="zone-card-header">
+          <strong>Zone ${index + 1}</strong>
+          <span>
+            <button type="button" class="zone-link" data-zone-action="match">Match study</button>
+            <button type="button" class="zone-link" data-zone-action="delete">Delete</button>
+          </span>
+        </div>
+        ${zoneSliderSpecs.map((spec) => `
+          <label class="zone-slider">
+            <span>${spec.label}</span>
+            <output>${formatZoneValue(spec.field, zone[spec.field])}</output>
+            <input type="range" min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${zone[spec.field]}" data-zone-field="${spec.field}" aria-label="Zone ${index + 1} ${spec.label}" />
+          </label>`).join("")}
+      </div>`).join("");
+  }
+  updateRunButton();
+  refreshZoneOverlay();
+};
+
+const addZoneFromStroke = (points: { x: number; y: number }[]) => {
+  processingZones.push({
+    id: crypto.randomUUID(),
+    shapes: [points.map((point) => ({ ...point }))],
+    blend: DEFAULT_ZONE_BLEND,
+    ...currentStudySettingsForZone(),
+  });
+  renderZoneList();
+  setStatus(`Zone ${processingZones.length} added. Adjust its sliders, then choose Create study with zones.`, "success");
+};
+
+const requestTransform = async (settings: {
+  transform: TransformName;
+  abstraction: number;
+  levels: number;
+  grayscaleMethod: Study["grayscaleMethod"];
+  thresholdMethod: string;
+  exposure: number;
+  shadows: number;
+  highlights: number;
+  workingResolution: number;
+}) => {
+  if (!selectedFile) throw new Error("No image is selected.");
+  const image = await selectedFile.arrayBuffer();
+  const id = nextRequestId++;
+  return new Promise<Extract<WorkerReply, { type: "complete" }>>((resolve, reject) => {
+    transformWaiters.set(id, { resolve, reject });
+    worker.postMessage({ type: "transform", id, image, ...settings }, [image]);
+  });
+};
+
+const traceShape = (context: CanvasRenderingContext2D, shape: { x: number; y: number }[], width: number, height: number) => {
+  context.beginPath();
+  context.moveTo(shape[0].x * width, shape[0].y * height);
+  for (const point of shape.slice(1)) context.lineTo(point.x * width, point.y * height);
+  context.closePath();
+};
+
+const loadResultBitmap = (buffer: ArrayBuffer) => createImageBitmap(new Blob([buffer], { type: "image/png" }));
+
+// Edge-replicating box blur, so a zone touching the photo border is not faded there.
+const boxBlurMask = (source: Float32Array, width: number, height: number, radius: number) => {
+  const size = radius * 2 + 1;
+  const horizontal = new Float32Array(source.length);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    let sum = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) sum += source[row + Math.min(width - 1, Math.max(0, offset))];
+    for (let x = 0; x < width; x += 1) {
+      horizontal[row + x] = sum / size;
+      sum += source[row + Math.min(width - 1, x + radius + 1)] - source[row + Math.max(0, x - radius)];
+    }
+  }
+  const output = new Float32Array(source.length);
+  for (let x = 0; x < width; x += 1) {
+    let sum = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) sum += horizontal[Math.min(height - 1, Math.max(0, offset)) * width + x];
+    for (let y = 0; y < height; y += 1) {
+      output[y * width + x] = sum / size;
+      sum += horizontal[Math.min(height - 1, y + radius + 1) * width + x] - horizontal[Math.max(0, y - radius) * width + x];
+    }
+  }
+  return output;
+};
+
+// Two box passes ramp over about 4 × radius pixels, centered on the zone outline.
+const buildFeatherMask = (shapes: { x: number; y: number }[][], blendPercent: number, width: number, height: number) => {
+  const scale = Math.min(1, 512 / Math.max(width, height));
+  const maskWidth = Math.max(1, Math.round(width * scale));
+  const maskHeight = Math.max(1, Math.round(height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = maskWidth;
+  canvas.height = maskHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Could not prepare the zone blend mask.");
+  context.fillStyle = "#fff";
+  for (const shape of shapes) {
+    traceShape(context, shape, maskWidth, maskHeight);
+    context.fill();
+  }
+  const pixels = context.getImageData(0, 0, maskWidth, maskHeight);
+  let mask = new Float32Array(maskWidth * maskHeight);
+  for (let index = 0; index < mask.length; index += 1) mask[index] = pixels.data[index * 4 + 3] / 255;
+  const radius = Math.max(1, Math.round((blendPercent / 100) * Math.min(maskWidth, maskHeight) / 4));
+  mask = boxBlurMask(boxBlurMask(mask, maskWidth, maskHeight, radius), maskWidth, maskHeight, radius);
+  for (let index = 0; index < mask.length; index += 1) {
+    pixels.data[index * 4] = 255;
+    pixels.data[index * 4 + 1] = 255;
+    pixels.data[index * 4 + 2] = 255;
+    pixels.data[index * 4 + 3] = Math.round(mask[index] * 255);
+  }
+  context.putImageData(pixels, 0, 0);
+  return canvas;
+};
+
+const createZonedStudy = async () => {
+  if (!selectedFile || !runtimeReady || pendingRequest !== undefined || pendingMergeRequest !== undefined || zoneRunActive) return;
+  const zones = cloneZones(processingZones);
+  if (zones.length === 0) return;
+  const base = {
+    transform: selectedTransform(),
+    abstraction: Number(abstractionSlider.value),
+    levels: Number(levelsSlider.value),
+    grayscaleMethod: grayscaleMethodSelect.value as Study["grayscaleMethod"],
+    thresholdMethod: thresholdSelect.value,
+    exposure: Number(exposureSlider.value),
+    shadows: Number(shadowsSlider.value),
+    highlights: Number(highlightsSlider.value),
+    workingResolution: Number(workingResolutionSelect.value),
+  };
+  const startedAt = performance.now();
+  zoneRunActive = true;
+  drawShapeMode = false;
+  zoneDrawMode = false;
+  activeZonePoints = [];
+  updateRunButton();
+  refreshZoneOverlay();
+  try {
+    setStatus("Processing the area outside the zones\u2026");
+    const baseResult = await requestTransform(base);
+    const zoneResults: Awaited<ReturnType<typeof requestTransform>>[] = [];
+    for (const [index, zone] of zones.entries()) {
+      setStatus(`Processing zone ${index + 1} of ${zones.length}\u2026`);
+      zoneResults.push(await requestTransform({
+        ...base,
+        abstraction: zone.abstraction,
+        exposure: zone.exposure,
+        shadows: zone.shadows,
+        highlights: zone.highlights,
+      }));
+    }
+
+    const baseBitmap = await loadResultBitmap(baseResult.image);
+    const canvas = document.createElement("canvas");
+    canvas.width = baseBitmap.width;
+    canvas.height = baseBitmap.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not prepare the zone composite.");
+    context.drawImage(baseBitmap, 0, 0);
+    baseBitmap.close();
+    let layerCanvas: HTMLCanvasElement | undefined;
+    for (const [index, zone] of zones.entries()) {
+      const bitmap = await loadResultBitmap(zoneResults[index].image);
+      if (zone.blend > 0) {
+        layerCanvas ??= document.createElement("canvas");
+        layerCanvas.width = canvas.width;
+        layerCanvas.height = canvas.height;
+        const layerContext = layerCanvas.getContext("2d");
+        if (!layerContext) throw new Error("Could not prepare the zone blend layer.");
+        layerContext.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        layerContext.globalCompositeOperation = "destination-in";
+        layerContext.imageSmoothingEnabled = true;
+        layerContext.imageSmoothingQuality = "high";
+        layerContext.drawImage(buildFeatherMask(zone.shapes, zone.blend, canvas.width, canvas.height), 0, 0, canvas.width, canvas.height);
+        context.drawImage(layerCanvas, 0, 0);
+      } else {
+        for (const shape of zone.shapes) {
+          context.save();
+          traceShape(context, shape, canvas.width, canvas.height);
+          context.clip();
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          context.restore();
+        }
+      }
+      bitmap.close();
+    }
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("Could not encode the zone composite.");
+
+    let regionFields: Pick<Study, "regionLabels" | "regionValues" | "regionWidth" | "regionHeight"> = {};
+    const results = [baseResult, ...zoneResults];
+    const sameMap = results.every((result) =>
+      result.regions && result.regionValues && result.regionWidth === baseResult.regionWidth && result.regionHeight === baseResult.regionHeight);
+    if (sameMap && baseResult.regions && baseResult.regionWidth && baseResult.regionHeight) {
+      const width = baseResult.regionWidth;
+      const height = baseResult.regionHeight;
+      const labels = new Uint32Array(baseResult.regions);
+      const valueParts = [new Uint8Array(baseResult.regionValues ?? new ArrayBuffer(0))];
+      let offset = valueParts[0].length;
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = width;
+      maskCanvas.height = height;
+      const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+      if (!maskContext) throw new Error("Could not prepare the zone region mask.");
+      for (const [index, zone] of zones.entries()) {
+        maskContext.clearRect(0, 0, width, height);
+        maskContext.fillStyle = "#fff";
+        for (const shape of zone.shapes) {
+          traceShape(maskContext, shape, width, height);
+          maskContext.fill();
+        }
+        const mask = maskContext.getImageData(0, 0, width, height).data;
+        const zoneLabels = new Uint32Array(zoneResults[index].regions ?? new ArrayBuffer(0));
+        for (let pixel = 0; pixel < labels.length; pixel += 1) {
+          if (mask[pixel * 4 + 3] > 127) labels[pixel] = zoneLabels[pixel] + offset;
+        }
+        const zoneValues = new Uint8Array(zoneResults[index].regionValues ?? new ArrayBuffer(0));
+        valueParts.push(zoneValues);
+        offset += zoneValues.length;
+      }
+      const values = new Uint8Array(offset);
+      let writeAt = 0;
+      for (const part of valueParts) {
+        values.set(part, writeAt);
+        writeAt += part.length;
+      }
+      regionFields = { regionLabels: labels, regionValues: values, regionWidth: width, regionHeight: height };
+    }
+
+    const study: Study = {
+      blob,
+      url: URL.createObjectURL(blob),
+      ...base,
+      autoAbstraction,
+      palettePaintIds: [...paintingPalettePaintIds],
+      paletteLimit: Number(paintingPaletteLimitInput.value),
+      zones,
+      ...regionFields,
+      createdAt: new Date(),
+      saved: false,
+    };
+    appendStudy(study, `Study with ${zones.length} ${zones.length === 1 ? "zone" : "zones"} complete in ${Math.round(performance.now() - startedAt)} ms.`);
+    await offerSnapshotSave(study);
+  } catch (error) {
+    setStatus(error instanceof Error ? `Could not apply zones: ${error.message}` : "Could not apply zones.", "error");
+  } finally {
+    zoneRunActive = false;
+    updateRunButton();
+    refreshZoneOverlay();
+  }
+};
+
 const normalizedCanvasPoint = (event: PointerEvent) => {
   const bounds = regionOverlay.getBoundingClientRect();
   return {
@@ -1608,6 +2071,44 @@ const finishShapeStroke = (event: PointerEvent) => {
 
 regionOverlay.addEventListener("pointerup", finishShapeStroke);
 regionOverlay.addEventListener("pointercancel", finishShapeStroke);
+
+const zonePoint = (event: PointerEvent) => {
+  const bounds = zoneOverlay.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+  };
+};
+
+zoneOverlay.addEventListener("pointerdown", (event) => {
+  if (!zoneDrawMode) return;
+  event.preventDefault();
+  zoneOverlay.setPointerCapture(event.pointerId);
+  activeZonePoints = [zonePoint(event)];
+  renderZoneOverlay();
+});
+zoneOverlay.addEventListener("pointermove", (event) => {
+  if (!zoneDrawMode || !zoneOverlay.hasPointerCapture(event.pointerId)) return;
+  event.preventDefault();
+  const point = zonePoint(event);
+  const previous = activeZonePoints[activeZonePoints.length - 1];
+  if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) > 0.004) activeZonePoints.push(point);
+  renderZoneOverlay();
+});
+const finishZoneStroke = (event: PointerEvent) => {
+  if (!zoneOverlay.hasPointerCapture(event.pointerId)) return;
+  zoneOverlay.releasePointerCapture(event.pointerId);
+  const points = activeZonePoints;
+  activeZonePoints = [];
+  if (points.length >= 3) addZoneFromStroke(points);
+  else renderZoneOverlay();
+};
+zoneOverlay.addEventListener("pointerup", finishZoneStroke);
+zoneOverlay.addEventListener("pointercancel", finishZoneStroke);
+// The overlay sits inside the upload label, so a click would otherwise open the file picker.
+zoneOverlay.addEventListener("click", (event) => event.preventDefault());
+sourcePreview.addEventListener("load", renderZoneOverlay);
+new ResizeObserver(renderZoneOverlay).observe(uploadCard);
 
 const appendStudy = (study: Study, completionMessage: string) => {
   regionMergeUndo = undefined;
@@ -1769,6 +2270,7 @@ const saveStudySnapshot = async (study: Study) => {
     palettePaintIds: study.palettePaintIds,
     paletteLimit: study.paletteLimit,
     ...(study.paintLayers?.length ? { paintLayers: study.paintLayers } : {}),
+    ...(study.zones?.length ? { zones: study.zones } : {}),
     ...(regionLabelsName && study.regionWidth && study.regionHeight
       ? { regionLabels: regionLabelsName, regionWidth: study.regionWidth, regionHeight: study.regionHeight }
       : {}),
@@ -1813,6 +2315,8 @@ const showStudy = async (index: number) => {
   paintingPaletteLimitInput.value = String(study.paletteLimit ?? Number(paintingPaletteLimitInput.value));
   paintingPaletteCustomized = true;
   renderPaintCatalog();
+  processingZones = cloneZones(study.zones ?? []);
+  renderZoneList();
   get<HTMLInputElement>(`input[name="transform"][value="${study.transform}"]`).checked = true;
   abstractionSlider.value = String(study.abstraction);
   autoAbstraction = study.autoAbstraction;
@@ -1960,6 +2464,48 @@ drawFillShapeButton.addEventListener("click", () => {
   const study = studyHistory[studyIndex];
   if (study?.regionLabels) renderRegionOverlay(study);
 });
+drawZoneButton.addEventListener("click", () => {
+  zoneDrawMode = !zoneDrawMode;
+  activeZonePoints = [];
+  if (zoneDrawMode) {
+    uploadCard.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    setStatus("Draw around an area of the original photo; each closed stroke becomes a zone.");
+  }
+  renderZoneOverlay();
+});
+applyZonesButton.addEventListener("click", () => { void createZonedStudy(); });
+clearZonesButton.addEventListener("click", () => {
+  processingZones = [];
+  renderZoneList();
+  refreshZoneOverlay();
+  setStatus("Zones cleared. Create a study to rebuild without them.", "success");
+});
+zoneList.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || !target.dataset.zoneField) return;
+  const zone = processingZones.find((candidate) => candidate.id === target.closest<HTMLElement>(".zone-card")?.dataset.zoneId);
+  if (!zone) return;
+  const field = target.dataset.zoneField as ZoneField;
+  zone[field] = Number(target.value);
+  const output = target.parentElement?.querySelector("output");
+  if (output) output.textContent = formatZoneValue(field, zone[field]);
+});
+zoneList.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement) || !target.dataset.zoneAction) return;
+  const zoneId = target.closest<HTMLElement>(".zone-card")?.dataset.zoneId;
+  const zone = processingZones.find((candidate) => candidate.id === zoneId);
+  if (!zone) return;
+  if (target.dataset.zoneAction === "delete") processingZones = processingZones.filter((candidate) => candidate !== zone);
+  else Object.assign(zone, currentStudySettingsForZone());
+  renderZoneList();
+  refreshZoneOverlay();
+});
+openGuideButton.addEventListener("click", () => guideDialog.showModal());
+closeGuideButton.addEventListener("click", () => guideDialog.close());
+guideDialog.addEventListener("click", (event) => {
+  if (event.target === guideDialog) guideDialog.close();
+});
 fillDrawnShapeButton.addEventListener("click", fillDrawnShapes);
 clearDrawnShapesButton.addEventListener("click", clearDrawnShapes);
 regionMultiSelectButton.addEventListener("click", () => {
@@ -2097,6 +2643,18 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     return;
   }
 
+  if (message.type === "complete" && transformWaiters.has(message.id)) {
+    transformWaiters.get(message.id)?.resolve(message);
+    transformWaiters.delete(message.id);
+    return;
+  }
+
+  if (message.type === "error" && message.id !== undefined && transformWaiters.has(message.id)) {
+    transformWaiters.get(message.id)?.reject(new Error(message.message));
+    transformWaiters.delete(message.id);
+    return;
+  }
+
   if (message.type === "tone-preview") {
     if (message.id !== pendingTonePreviewId || toneSettingsAreNeutral()) return;
     pendingTonePreviewId = undefined;
@@ -2194,8 +2752,8 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
     shadows: Number(shadowsSlider.value),
     highlights: Number(highlightsSlider.value),
     workingResolution: Number(workingResolutionSelect.value),
-      palettePaintIds: [...paintingPalettePaintIds],
-      paletteLimit: Number(paintingPaletteLimitInput.value),
+    palettePaintIds: [...paintingPalettePaintIds],
+    paletteLimit: Number(paintingPaletteLimitInput.value),
     ...(message.regions && message.regionWidth && message.regionHeight
       ? {
           regionLabels: new Uint32Array(message.regions),
@@ -2221,6 +2779,10 @@ worker.addEventListener("error", (event) => {
 
 runButton.addEventListener("click", async () => {
   if (!selectedFile || !runtimeReady || pendingRequest !== undefined) return;
+  if (processingZones.length > 0) {
+    await createZonedStudy();
+    return;
+  }
   const image = await selectedFile.arrayBuffer();
   const id = nextRequestId++;
   pendingRequest = id;
@@ -2248,6 +2810,7 @@ runButton.addEventListener("click", async () => {
 updateSettings();
 renderPaintCatalog();
 updateToneLabels();
+renderZoneList();
 updateRunButton();
 setRuntimeState("Loading Pyodide runtime…", "loading");
 worker.postMessage({ type: "initialize", modules });
