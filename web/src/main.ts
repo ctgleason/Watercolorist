@@ -727,13 +727,17 @@ const createPaintedStudyBlob = async (study: Study) => {
   await resultPreview.decode();
   if (studyHistory[studyIndex] !== study) return undefined;
   const canvas = document.createElement("canvas");
-  canvas.width = resultPreview.naturalWidth;
-  canvas.height = resultPreview.naturalHeight;
+  const shrink = Math.min(1, Math.sqrt(16_000_000 / (resultPreview.naturalWidth * resultPreview.naturalHeight)));
+  canvas.width = Math.max(1, Math.round(resultPreview.naturalWidth * shrink));
+  canvas.height = Math.max(1, Math.round(resultPreview.naturalHeight * shrink));
   const context = canvas.getContext("2d");
   if (!context) return undefined;
-  context.drawImage(resultPreview, 0, 0);
+  context.drawImage(resultPreview, 0, 0, canvas.width, canvas.height);
   context.drawImage(regionColorOverlay, 0, 0, canvas.width, canvas.height);
-  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  canvas.width = 0;
+  canvas.height = 0;
+  return blob;
 };
 
 const updateStudyDownload = async (study: Study) => {
@@ -755,12 +759,16 @@ const updateStudyDownload = async (study: Study) => {
   }
 };
 
+const sizeCanvas = (canvas: HTMLCanvasElement, width: number, height: number) => {
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+};
+
 const renderPaintOverlay = (study: Study) => {
   if (!study.regionLabels || !study.regionValues || !study.regionWidth || !study.regionHeight) return;
   const context = regionColorOverlay.getContext("2d");
   if (!context) return;
-  regionColorOverlay.width = study.regionWidth;
-  regionColorOverlay.height = study.regionHeight;
+  sizeCanvas(regionColorOverlay, study.regionWidth, study.regionHeight);
   const image = context.createImageData(study.regionWidth, study.regionHeight);
   const layers = (study.paintLayers ?? []).flatMap((layer) => {
     const paint = paintCatalog.find((entry) => entry.id === layer.paintId);
@@ -1493,10 +1501,8 @@ const renderStudy = (study: Study) => {
   const maxWidth = Math.max(1, resultCard.clientWidth - 2);
   resultStage.style.width = `${Math.min(maxWidth, 430 * aspect)}px`;
   resultStage.style.aspectRatio = `${study.regionWidth} / ${study.regionHeight}`;
-  regionOverlay.width = study.regionWidth;
-  regionOverlay.height = study.regionHeight;
-  regionColorOverlay.width = study.regionWidth;
-  regionColorOverlay.height = study.regionHeight;
+  sizeCanvas(regionOverlay, study.regionWidth, study.regionHeight);
+  sizeCanvas(regionColorOverlay, study.regionWidth, study.regionHeight);
   updateRegionPaintChoices();
   regionWashOutput.value = `${regionWashSlider.value}%`;
   applyRegionPaintButton.disabled = selectedRegionIds.size === 0 || !regionPaintChoice.value;
@@ -1717,19 +1723,27 @@ const renderZoneOverlay = () => {
   const scale = Math.min(boxWidth / naturalWidth, boxHeight / naturalHeight);
   const width = naturalWidth * scale;
   const height = naturalHeight * scale;
-  const ratio = window.devicePixelRatio || 1;
+  const ratio = Math.min(2, window.devicePixelRatio || 1);
   zoneOverlay.hidden = false;
-  zoneOverlay.style.left = `${(boxWidth - width) / 2}px`;
-  zoneOverlay.style.top = `${(boxHeight - height) / 2}px`;
-  zoneOverlay.style.width = `${width}px`;
-  zoneOverlay.style.height = `${height}px`;
-  zoneOverlay.width = Math.max(1, Math.round(width * ratio));
-  zoneOverlay.height = Math.max(1, Math.round(height * ratio));
+  const layoutKey = [boxWidth, boxHeight, naturalWidth, naturalHeight].join("x");
+  if (zoneOverlay.dataset.layout !== layoutKey) {
+    zoneOverlay.dataset.layout = layoutKey;
+    zoneOverlay.style.left = `${(boxWidth - width) / 2}px`;
+    zoneOverlay.style.top = `${(boxHeight - height) / 2}px`;
+    zoneOverlay.style.width = `${width}px`;
+    zoneOverlay.style.height = `${height}px`;
+  }
+  // Assigning width or height reallocates the bitmap, which mobile Safari frees slowly.
+  const pixelWidth = Math.max(1, Math.round(width * ratio));
+  const pixelHeight = Math.max(1, Math.round(height * ratio));
+  if (zoneOverlay.width !== pixelWidth) zoneOverlay.width = pixelWidth;
+  if (zoneOverlay.height !== pixelHeight) zoneOverlay.height = pixelHeight;
   zoneOverlay.classList.toggle("is-drawing", zoneDrawMode);
   drawZoneButton.setAttribute("aria-pressed", String(zoneDrawMode));
   drawZoneButton.textContent = zoneDrawMode ? "Finish zone" : "Draw zone";
   const context = zoneOverlay.getContext("2d");
   if (!context) return;
+  context.clearRect(0, 0, pixelWidth, pixelHeight);
   const trace = (points: { x: number; y: number }[], close: boolean) => {
     context.beginPath();
     context.moveTo(points[0].x * zoneOverlay.width, points[0].y * zoneOverlay.height);
@@ -1774,6 +1788,25 @@ const refreshZoneOverlay = () => {
   renderZoneOverlay();
   const study = activeStudy();
   if (study) renderRegionOverlay(study);
+};
+
+let zoneRenderFrame: number | undefined;
+const scheduleZoneOverlay = () => {
+  if (zoneRenderFrame !== undefined) return;
+  zoneRenderFrame = requestAnimationFrame(() => {
+    zoneRenderFrame = undefined;
+    renderZoneOverlay();
+  });
+};
+
+let regionRenderFrame: number | undefined;
+const scheduleRegionOverlay = () => {
+  if (regionRenderFrame !== undefined) return;
+  regionRenderFrame = requestAnimationFrame(() => {
+    regionRenderFrame = undefined;
+    const study = activeStudy();
+    if (study) renderRegionOverlay(study);
+  });
 };
 
 const renderZoneList = () => {
@@ -1934,22 +1967,28 @@ const createZonedStudy = async () => {
     }
 
     const baseBitmap = await loadResultBitmap(baseResult.image);
+    // Phone browsers fail on canvases much beyond ~16 megapixels, so very large photos are scaled down here.
+    const shrink = Math.min(1, Math.sqrt(16_000_000 / (baseBitmap.width * baseBitmap.height)));
     const canvas = document.createElement("canvas");
-    canvas.width = baseBitmap.width;
-    canvas.height = baseBitmap.height;
+    canvas.width = Math.max(1, Math.round(baseBitmap.width * shrink));
+    canvas.height = Math.max(1, Math.round(baseBitmap.height * shrink));
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Could not prepare the zone composite.");
-    context.drawImage(baseBitmap, 0, 0);
+    context.drawImage(baseBitmap, 0, 0, canvas.width, canvas.height);
     baseBitmap.close();
     let layerCanvas: HTMLCanvasElement | undefined;
     for (const [index, zone] of zones.entries()) {
       const bitmap = await loadResultBitmap(zoneResults[index].image);
       if (zone.blend > 0) {
-        layerCanvas ??= document.createElement("canvas");
-        layerCanvas.width = canvas.width;
-        layerCanvas.height = canvas.height;
+        if (!layerCanvas) {
+          layerCanvas = document.createElement("canvas");
+          layerCanvas.width = canvas.width;
+          layerCanvas.height = canvas.height;
+        }
         const layerContext = layerCanvas.getContext("2d");
         if (!layerContext) throw new Error("Could not prepare the zone blend layer.");
+        layerContext.globalCompositeOperation = "source-over";
+        layerContext.clearRect(0, 0, canvas.width, canvas.height);
         layerContext.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
         layerContext.globalCompositeOperation = "destination-in";
         layerContext.imageSmoothingEnabled = true;
@@ -1968,6 +2007,12 @@ const createZonedStudy = async () => {
       bitmap.close();
     }
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    canvas.width = 0;
+    canvas.height = 0;
+    if (layerCanvas) {
+      layerCanvas.width = 0;
+      layerCanvas.height = 0;
+    }
     if (!blob) throw new Error("Could not encode the zone composite.");
 
     let regionFields: Pick<Study, "regionLabels" | "regionValues" | "regionWidth" | "regionHeight"> = {};
@@ -2046,8 +2091,7 @@ regionOverlay.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   regionOverlay.setPointerCapture(event.pointerId);
   activeShapePoints = [normalizedCanvasPoint(event)];
-  const study = studyHistory[studyIndex];
-  if (study) renderRegionOverlay(study);
+  scheduleRegionOverlay();
 });
 
 regionOverlay.addEventListener("pointermove", (event) => {
@@ -2056,8 +2100,7 @@ regionOverlay.addEventListener("pointermove", (event) => {
   const point = normalizedCanvasPoint(event);
   const previous = activeShapePoints[activeShapePoints.length - 1];
   if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) > 0.004) activeShapePoints.push(point);
-  const study = studyHistory[studyIndex];
-  if (study) renderRegionOverlay(study);
+  scheduleRegionOverlay();
 });
 
 const finishShapeStroke = (event: PointerEvent) => {
@@ -2085,7 +2128,7 @@ zoneOverlay.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   zoneOverlay.setPointerCapture(event.pointerId);
   activeZonePoints = [zonePoint(event)];
-  renderZoneOverlay();
+  scheduleZoneOverlay();
 });
 zoneOverlay.addEventListener("pointermove", (event) => {
   if (!zoneDrawMode || !zoneOverlay.hasPointerCapture(event.pointerId)) return;
@@ -2093,7 +2136,7 @@ zoneOverlay.addEventListener("pointermove", (event) => {
   const point = zonePoint(event);
   const previous = activeZonePoints[activeZonePoints.length - 1];
   if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) > 0.004) activeZonePoints.push(point);
-  renderZoneOverlay();
+  scheduleZoneOverlay();
 });
 const finishZoneStroke = (event: PointerEvent) => {
   if (!zoneOverlay.hasPointerCapture(event.pointerId)) return;
@@ -2768,6 +2811,14 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
   appendStudy(study, `Study complete in ${message.transformMs} ms.`);
   await offerSnapshotSave(study);
   updateRunButton();
+});
+
+window.addEventListener("error", (event) => {
+  if (event.message.startsWith("ResizeObserver")) return;
+  setStatus(`Unexpected error: ${event.message}`, "error");
+});
+window.addEventListener("unhandledrejection", (event) => {
+  setStatus(`Unexpected error: ${event.reason instanceof Error ? event.reason.message : String(event.reason)}`, "error");
 });
 
 worker.addEventListener("error", (event) => {
