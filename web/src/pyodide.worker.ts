@@ -40,6 +40,7 @@ type TonePreviewRequest = {
   exposure: number;
   shadows: number;
   highlights: number;
+  zoneTones?: { exposure: number; shadows: number; highlights: number }[];
 };
 
 type WorkerRequest =
@@ -57,7 +58,7 @@ type WorkerResponse =
       packageLoadMs: number;
     }
   | { type: "estimate"; id: number; abstraction: number }
-  | { type: "tone-preview"; id: number; image: ArrayBuffer }
+  | { type: "tone-preview"; id: number; images: ArrayBuffer[] }
   | {
       type: "merge-complete";
       id: number;
@@ -166,32 +167,30 @@ const handleMessage = async (data: WorkerRequest) => {
 
     const startedAt = performance.now();
     if (data.type === "tone-preview") {
-      pyodide.globals.set("_watercolorist_exposure", data.exposure);
-      pyodide.globals.set("_watercolorist_shadows", data.shadows);
-      pyodide.globals.set("_watercolorist_highlights", data.highlights);
-      const outputPath = `/watercolorist-output-${data.id}.png`;
-      cleanupPaths.push(outputPath);
+      const tones = [{ exposure: data.exposure, shadows: data.shadows, highlights: data.highlights }, ...(data.zoneTones ?? [])];
+      const paths = tones.map((_, index) => `/watercolorist-preview-${data.id}-${index}.png`);
+      cleanupPaths.push(...paths);
       await pyodide.runPythonAsync(`
 from watercolorist.images import load_rgb
 from watercolorist.transforms import adjust_tone
 
-_preview = adjust_tone(
-  load_rgb(${JSON.stringify(inputPath)}),
-    exposure=_watercolorist_exposure,
-    shadows=_watercolorist_shadows,
-    highlights=_watercolorist_highlights,
-)
-_preview.save(${JSON.stringify(outputPath)}, format="PNG")
+_preview_source = load_rgb(${JSON.stringify(inputPath)})
+_preview_tones = ${JSON.stringify(tones)}
+_preview_paths = ${JSON.stringify(paths)}
+for _tone, _path in zip(_preview_tones, _preview_paths):
+    _preview = adjust_tone(_preview_source, **_tone)
+    _preview.save(_path, format="PNG")
+del _preview, _preview_source
 `);
-      const previewOutput = pyodide.FS.readFile(outputPath);
-      const previewImage = new ArrayBuffer(previewOutput.byteLength);
-      new Uint8Array(previewImage).set(previewOutput);
-      pyodide.FS.unlink(outputPath);
+      const images = paths.map((path) => {
+        const output = pyodide!.FS.readFile(path);
+        const image = new ArrayBuffer(output.byteLength);
+        new Uint8Array(image).set(output);
+        pyodide!.FS.unlink(path);
+        return image;
+      });
       pyodide.FS.unlink(inputPath);
-      workerContext.postMessage(
-        { type: "tone-preview", id: data.id, image: previewImage },
-        [previewImage],
-      );
+      workerContext.postMessage({ type: "tone-preview", id: data.id, images }, images);
       return;
     }
 

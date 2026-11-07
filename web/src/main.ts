@@ -92,7 +92,7 @@ type WorkerReply =
       packageLoadMs: number;
     }
   | { type: "estimate"; id: number; abstraction: number }
-  | { type: "tone-preview"; id: number; image: ArrayBuffer }
+  | { type: "tone-preview"; id: number; images: ArrayBuffer[] }
   | {
       type: "complete";
       id: number;
@@ -147,7 +147,7 @@ app.innerHTML = `
             <canvas class="zone-overlay" id="zone-overlay" aria-label="Draw processing zones on the reference image" hidden></canvas>
           </label>
           <div class="zone-controls" id="zone-controls" hidden>
-            <div class="zone-heading"><strong>Processing zones</strong><span>Draw around an area of your original photo to give it its own abstraction and tone. Everything outside the zones uses the study settings.</span></div>
+            <div class="zone-heading"><strong>Processing zones</strong><span>Draw on the photo to give an area its own settings. Tone and edge blend preview live; abstraction appears in the study. Outside zones use the main settings.</span></div>
             <div class="zone-actions">
               <button class="region-action" id="draw-zone" type="button" aria-pressed="false">Draw zone</button>
               <button class="region-action region-paint-apply" id="apply-zones" type="button" disabled>Create study with zones</button>
@@ -359,6 +359,7 @@ app.innerHTML = `
             <li>Use zones when part of the photo needs different abstraction or tone, such as a detailed focal point or a dark foreground. You don't need a study first: zones are drawn on your original photo.</li>
             <li>Under the photo, tap <strong>Draw zone</strong> and trace around an area. Each closed stroke becomes a numbered zone (Z1, Z2…); tap <strong>Finish zone</strong> when done.</li>
             <li>Set each zone's abstraction, exposure, shadows, and highlights. Areas outside every zone use the main study settings. Later zones sit on top of earlier ones.</li>
+            <li>Zone exposure, shadows, highlights, and edge blend preview on the photo as you adjust them. Abstraction is shown after creating a study.</li>
             <li><strong>Edge blend</strong> softens the transition across a zone's outline, split evenly on both sides, so settings don't change abruptly. Set it to Off for a hard edge; higher values widen the transition.</li>
             <li>Tap <strong>Create study with zones</strong> (or <strong>Create study</strong>). The original photo is processed once for the main settings and once per zone, then combined. <strong>Match study</strong> resets a zone to the main settings; <strong>Delete</strong> or <strong>Clear zones</strong> removes them.</li>
           </ul>
@@ -495,6 +496,11 @@ let tonePreviewResolution: number | undefined;
 let tonePreviewUrl: string | undefined;
 let tonePreviewTimer: number | undefined;
 let pendingTonePreviewId: number | undefined;
+let tonePreviewRevision = 0;
+let tonePreviewInFlight = false;
+let tonePreviewPending = false;
+let tonePreviewRequest: { id: number; revision: number; file: File; zones: ProcessingZone[] } | undefined;
+let tonePreviewSourceRevision = 0;
 const MAX_STUDY_HISTORY = 20;
 let studyHistory: Study[] = [];
 let studyIndex = -1;
@@ -1293,11 +1299,13 @@ const toneSettingsAreNeutral = () =>
   Number(highlightsSlider.value) === 0;
 
 const scheduleTonePreview = () => {
+  tonePreviewRevision += 1;
+  tonePreviewPending = true;
   if (tonePreviewTimer !== undefined) window.clearTimeout(tonePreviewTimer);
   tonePreviewTimer = undefined;
-  pendingTonePreviewId = undefined;
 
-  if (toneSettingsAreNeutral()) {
+  if (toneSettingsAreNeutral() && processingZones.every((zone) => zone.exposure === 0 && zone.shadows === 0 && zone.highlights === 0)) {
+    tonePreviewPending = false;
     if (tonePreviewUrl) URL.revokeObjectURL(tonePreviewUrl);
     tonePreviewUrl = undefined;
     sourcePreview.src = sourceUrl ?? "";
@@ -1312,14 +1320,16 @@ const scheduleTonePreview = () => {
     tonePreviewResolution !== Number(workingResolutionSelect.value)
   ) return;
 
-  uploadHint.textContent = "Live tone preview · full resolution on Create study";
+  if (tonePreviewInFlight) return;
   tonePreviewTimer = window.setTimeout(() => {
     tonePreviewTimer = undefined;
     void requestTonePreview();
-  }, 120);
+  }, 180);
 };
 
 const prepareTonePreviewSource = async (file: File) => {
+  const preparationRevision = ++tonePreviewSourceRevision;
+  const workingResolution = Number(workingResolutionSelect.value);
   const temporaryUrl = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -1327,7 +1337,6 @@ const prepareTonePreviewSource = async (file: File) => {
     await image.decode();
     if (selectedFile !== file) return;
 
-    const workingResolution = Number(workingResolutionSelect.value);
     const maxEdge = Math.max(320, Math.round(1280 * workingResolution));
     const resize = Math.min(1, maxEdge / Math.max(image.naturalWidth, image.naturalHeight));
     const canvas = document.createElement("canvas");
@@ -1336,13 +1345,17 @@ const prepareTonePreviewSource = async (file: File) => {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Could not prepare a tone preview canvas.");
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    tonePreviewSource = await new Promise<Blob>((resolve, reject) => {
+    const previewSource = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
         (blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the tone preview."))),
         "image/jpeg",
         0.88,
       );
     });
+    canvas.width = 0;
+    canvas.height = 0;
+    if (preparationRevision !== tonePreviewSourceRevision || selectedFile !== file || Number(workingResolutionSelect.value) !== workingResolution) return;
+    tonePreviewSource = previewSource;
     tonePreviewSourceFile = file;
     tonePreviewResolution = workingResolution;
     scheduleTonePreview();
@@ -1362,23 +1375,45 @@ const requestTonePreview = async () => {
     !source ||
     tonePreviewSourceFile !== selectedFile ||
     tonePreviewResolution !== Number(workingResolutionSelect.value) ||
-    !runtimeReady
+    !runtimeReady || tonePreviewInFlight || !tonePreviewPending
   ) return;
+  const file = selectedFile;
+  if (!file) return;
+  const revision = tonePreviewRevision;
+  const zones = cloneZones(processingZones);
   const id = nextRequestId++;
   pendingTonePreviewId = id;
-  const image = await source.arrayBuffer();
-  if (pendingTonePreviewId !== id || tonePreviewSourceFile !== selectedFile) return;
-  worker.postMessage(
-    {
+  tonePreviewInFlight = true;
+  tonePreviewPending = false;
+  tonePreviewRequest = { id, revision, file, zones };
+  try {
+    const image = await source.arrayBuffer();
+    if (revision !== tonePreviewRevision || file !== selectedFile) {
+      finishTonePreview(id);
+      return;
+    }
+    worker.postMessage({
       type: "tone-preview",
       id,
       image,
       exposure: Number(exposureSlider.value),
       shadows: Number(shadowsSlider.value),
       highlights: Number(highlightsSlider.value),
-    },
-    [image],
-  );
+      zoneTones: zones.map(({ exposure, shadows, highlights }) => ({ exposure, shadows, highlights })),
+    }, [image]);
+  } catch (error) {
+    if (revision === tonePreviewRevision) uploadHint.textContent = "Live preview failed · Create study uses the full image";
+    finishTonePreview(id);
+    console.warn("Could not prepare tone preview", error);
+  }
+};
+
+const finishTonePreview = (id: number) => {
+  if (pendingTonePreviewId !== id) return;
+  pendingTonePreviewId = undefined;
+  tonePreviewRequest = undefined;
+  tonePreviewInFlight = false;
+  if (tonePreviewPending) scheduleTonePreview();
 };
 
 const resetTone = () => {
@@ -1451,7 +1486,9 @@ const setSelectedFile = (file: File) => {
   pendingMergeRequest = undefined;
   if (tonePreviewTimer !== undefined) window.clearTimeout(tonePreviewTimer);
   tonePreviewTimer = undefined;
-  pendingTonePreviewId = undefined;
+  tonePreviewRevision += 1;
+  tonePreviewSourceRevision += 1;
+  tonePreviewPending = false;
   tonePreviewSource = undefined;
   tonePreviewSourceFile = undefined;
   tonePreviewResolution = undefined;
@@ -1876,6 +1913,7 @@ const addZoneFromStroke = (points: { x: number; y: number }[]) => {
     ...currentStudySettingsForZone(),
   });
   renderZoneList();
+  scheduleTonePreview();
   setStatus(`Zone ${processingZones.length} added. Adjust its sliders, then choose Create study with zones.`, "success");
 };
 
@@ -1961,6 +1999,74 @@ const buildFeatherMask = (shapes: { x: number; y: number }[][], blendPercent: nu
   }
   context.putImageData(pixels, 0, 0);
   return canvas;
+};
+
+const publishTonePreview = async (id: number, images: ArrayBuffer[]) => {
+  const request = tonePreviewRequest;
+  if (!request || request.id !== id) return;
+  const current = () => request.revision === tonePreviewRevision && request.file === selectedFile;
+  let canvas: HTMLCanvasElement | undefined;
+  let layer: HTMLCanvasElement | undefined;
+  try {
+    if (!current()) return;
+    if (images.length !== request.zones.length + 1) throw new Error("Incomplete zone preview");
+    const base = await createImageBitmap(new Blob([images[0]], { type: "image/png" }));
+    if (!current()) { base.close(); return; }
+    canvas = document.createElement("canvas");
+    canvas.width = base.width;
+    canvas.height = base.height;
+    const context = canvas.getContext("2d");
+    if (!context) { base.close(); throw new Error("Preview canvas unavailable"); }
+    context.drawImage(base, 0, 0);
+    base.close();
+    for (const [index, zone] of request.zones.entries()) {
+      const bitmap = await createImageBitmap(new Blob([images[index + 1]], { type: "image/png" }));
+      try {
+        if (!current()) return;
+        if (zone.blend > 0) {
+          if (!layer) {
+            layer = document.createElement("canvas");
+            layer.width = canvas.width;
+            layer.height = canvas.height;
+          }
+          const layerContext = layer.getContext("2d");
+          if (!layerContext) throw new Error("Preview blend canvas unavailable");
+          layerContext.globalCompositeOperation = "source-over";
+          layerContext.clearRect(0, 0, layer.width, layer.height);
+          layerContext.drawImage(bitmap, 0, 0, layer.width, layer.height);
+          layerContext.globalCompositeOperation = "destination-in";
+          const mask = buildFeatherMask(zone.shapes, zone.blend, layer.width, layer.height);
+          layerContext.drawImage(mask, 0, 0, layer.width, layer.height);
+          mask.width = 0;
+          mask.height = 0;
+          context.drawImage(layer, 0, 0);
+        } else {
+          for (const shape of zone.shapes) {
+            context.save();
+            traceShape(context, shape, canvas.width, canvas.height);
+            context.clip();
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            context.restore();
+          }
+        }
+      } finally {
+        bitmap.close();
+      }
+    }
+    const blob = await new Promise<Blob | null>((resolve) => canvas!.toBlob(resolve, "image/png"));
+    if (!current() || !blob) return;
+    if (tonePreviewUrl) URL.revokeObjectURL(tonePreviewUrl);
+    tonePreviewUrl = URL.createObjectURL(blob);
+    sourcePreview.src = tonePreviewUrl;
+    uploadHint.textContent = "Live tone preview · full resolution on Create study";
+  } catch (error) {
+    if (current()) uploadHint.textContent = "Live preview failed · Create study uses the full image";
+    console.warn("Could not render tone preview", error);
+  } finally {
+    if (layer) { layer.width = 0; layer.height = 0; }
+    if (canvas) { canvas.width = 0; canvas.height = 0; }
+    finishTonePreview(id);
+  }
 };
 
 const createZonedStudy = async () => {
@@ -2418,7 +2524,12 @@ const showStudy = async (index: number) => {
   highlightsSlider.value = String(study.highlights);
   workingResolutionSelect.value = String(study.workingResolution);
   updateToneLabels();
-  scheduleTonePreview();
+  if (selectedFile && (tonePreviewSourceFile !== selectedFile || tonePreviewResolution !== study.workingResolution)) {
+    scheduleTonePreview();
+    void prepareTonePreviewSource(selectedFile);
+  } else {
+    scheduleTonePreview();
+  }
   updateSettings();
   selectedRegionIds.clear();
   selectedRegionSeeds.clear();
@@ -2576,6 +2687,7 @@ clearZonesButton.addEventListener("click", () => {
   processingZones = [];
   renderZoneList();
   refreshZoneOverlay();
+  scheduleTonePreview();
   setStatus("Zones cleared. Create a study to rebuild without them.", "success");
 });
 zoneList.addEventListener("input", (event) => {
@@ -2587,6 +2699,7 @@ zoneList.addEventListener("input", (event) => {
   zone[field] = Number(target.value);
   const output = target.parentElement?.querySelector("output");
   if (output) output.textContent = formatZoneValue(field, zone[field]);
+  if (field !== "abstraction") scheduleTonePreview();
 });
 zoneList.addEventListener("click", (event) => {
   const target = event.target;
@@ -2598,6 +2711,7 @@ zoneList.addEventListener("click", (event) => {
   else Object.assign(zone, currentStudySettingsForZone());
   renderZoneList();
   refreshZoneOverlay();
+  scheduleTonePreview();
 });
 openGuideButton.addEventListener("click", () => guideDialog.showModal());
 closeGuideButton.addEventListener("click", () => guideDialog.close());
@@ -2685,7 +2799,9 @@ workingResolutionSelect.addEventListener("change", () => {
   tonePreviewSource = undefined;
   tonePreviewSourceFile = undefined;
   tonePreviewResolution = undefined;
-  pendingTonePreviewId = undefined;
+  tonePreviewRevision += 1;
+  tonePreviewSourceRevision += 1;
+  tonePreviewPending = true;
   if (selectedFile) void prepareTonePreviewSource(selectedFile);
   if (autoAbstraction) {
     pendingEstimateId = undefined;
@@ -2754,12 +2870,7 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
   }
 
   if (message.type === "tone-preview") {
-    if (message.id !== pendingTonePreviewId || toneSettingsAreNeutral()) return;
-    pendingTonePreviewId = undefined;
-    if (tonePreviewUrl) URL.revokeObjectURL(tonePreviewUrl);
-    tonePreviewUrl = URL.createObjectURL(new Blob([message.image], { type: "image/png" }));
-    sourcePreview.src = tonePreviewUrl;
-    uploadHint.textContent = "Live tone preview · full resolution on Create study";
+    if (message.id === pendingTonePreviewId) void publishTonePreview(message.id, message.images);
     return;
   }
 
@@ -2786,8 +2897,8 @@ worker.addEventListener("message", async (event: MessageEvent<WorkerReply>) => {
       return;
     }
     if (message.id !== undefined && message.id === pendingTonePreviewId) {
-      pendingTonePreviewId = undefined;
-      uploadHint.textContent = "Live preview failed · Create study uses the full image";
+      if (tonePreviewRequest?.revision === tonePreviewRevision) uploadHint.textContent = "Live preview failed · Create study uses the full image";
+      finishTonePreview(message.id);
       return;
     }
     if (message.id !== undefined && message.id === pendingEstimateId) {
@@ -2878,6 +2989,9 @@ window.addEventListener("unhandledrejection", (event) => {
 
 worker.addEventListener("error", (event) => {
   runtimeReady = false;
+  tonePreviewRevision += 1;
+  tonePreviewPending = false;
+  if (pendingTonePreviewId !== undefined) finishTonePreview(pendingTonePreviewId);
   setRuntimeState("Python worker error", "error");
   setStatus(event.message || "The Python worker could not start.", "error");
   updateRunButton();
