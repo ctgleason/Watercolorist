@@ -154,10 +154,10 @@ const handleMessage = async (data: WorkerRequest) => {
     cleanupPaths.push(inputPath);
 
     if (data.type === "estimate") {
-      await pyodide.runPythonAsync("from PIL import Image\nfrom watercolorist.defaults import estimate_abstraction");
+      await pyodide.runPythonAsync("from watercolorist.images import load_rgb\nfrom watercolorist.defaults import estimate_abstraction");
       pyodide.globals.set("_watercolorist_working_resolution", data.workingResolution);
       const abstraction = pyodide.runPython(
-        `estimate_abstraction(Image.open(${JSON.stringify(inputPath)}).convert("RGB"), working_resolution=_watercolorist_working_resolution)`,
+        `estimate_abstraction(load_rgb(${JSON.stringify(inputPath)}), working_resolution=_watercolorist_working_resolution)`,
       ) as number;
       pyodide.FS.unlink(inputPath);
       workerContext.postMessage({ type: "estimate", id: data.id, abstraction });
@@ -172,11 +172,11 @@ const handleMessage = async (data: WorkerRequest) => {
       const outputPath = `/watercolorist-output-${data.id}.png`;
       cleanupPaths.push(outputPath);
       await pyodide.runPythonAsync(`
-from PIL import Image
+from watercolorist.images import load_rgb
 from watercolorist.transforms import adjust_tone
 
 _preview = adjust_tone(
-    Image.open(${JSON.stringify(inputPath)}).convert("RGB"),
+  load_rgb(${JSON.stringify(inputPath)}),
     exposure=_watercolorist_exposure,
     shadows=_watercolorist_shadows,
     highlights=_watercolorist_highlights,
@@ -265,10 +265,10 @@ with open(${JSON.stringify(outputRegionValuesPath)}, "wb") as _region_values_fil
     const outputPath = `/watercolorist-output-${data.id}.png`;
     cleanupPaths.push(outputPath);
     await pyodide.runPythonAsync(`
-from PIL import Image
+from watercolorist.images import load_rgb
 from watercolorist.transforms import _region_map_for_grayscale, grayscale_study_with_regions, notan_study
 
-_source = Image.open(${JSON.stringify(inputPath)}).convert("RGB")
+_source = load_rgb(${JSON.stringify(inputPath)})
 _region_labels = None
 _region_values = None
 if _watercolorist_transform == "notan":

@@ -4,6 +4,7 @@ import initSource from "../../src/watercolorist/__init__.py?raw";
 import imagesSource from "../../src/watercolorist/images.py?raw";
 import transformsSource from "../../src/watercolorist/transforms.py?raw";
 import { paintBrandOptions, paintCatalog } from "./paint-catalog";
+import { bestWashMatch, findPaintMatch, mixColors, type PaintComponent } from "./paint-mixing";
 import "./style.css";
 
 type TransformName = "notan" | "grayscale";
@@ -15,6 +16,7 @@ type RegionPaintLayer = {
   paintId: string;
   secondPaintId?: string;
   mixRatio?: number;
+  components?: PaintComponent[];
   washStrength: number;
 };
 
@@ -215,7 +217,7 @@ app.innerHTML = `
               <button class="region-action" id="draw-fill-shape" type="button" aria-pressed="false">Draw shape</button>
               <button class="region-action region-paint-apply" id="fill-drawn-shape" type="button" disabled>Fill drawn shape</button>
               <button class="region-action" id="clear-drawn-shapes" type="button" disabled>Clear shapes</button>
-              <span class="region-paint-note">Auto-match may combine two palette paints and vary wash strength. Color and cold-press paper rendering are approximate.</span>
+              <span class="region-paint-note">Auto-match may combine up to three palette paints and vary wash strength. Colors and washes are approximate.</span>
             </div>
           </div>
           <p class="image-caption" id="image-caption">No image selected</p>
@@ -291,7 +293,8 @@ app.innerHTML = `
           <details class="palette-panel" id="palette-panel">
             <summary><span>Watercolor palette</span><output id="palette-count">0 paints selected</output></summary>
             <div class="palette-controls">
-              <p class="setting-help">Choose paints you own or plan to use; this inventory is saved in this browser. Use the “Use” checkboxes to choose colors for this painting, or ask the app to suggest a limited palette. QoR and Winsor &amp; Newton entries show chart-listed pigments and handling data; DANIEL SMITH includes CIE Lab measurements for the first 20 chart entries. Manufacturer chart values are references, not calibrated screen swatches.</p>
+              <p class="setting-help">Choose paints you own or plan to use. Your inventory and last-used painting palette are saved in this browser; other devices, browsers, and installed apps may have separate storage. Use the “Use” checkboxes to choose colors for this painting, or ask the app to suggest a limited palette. Manufacturer chart values are references, not calibrated screen swatches.</p>
+              <p class="palette-storage-warning" id="palette-storage-warning" role="status" hidden></p>
               <label class="visually-hidden" for="paint-search">Search paint names</label>
               <input id="paint-search" type="search" placeholder="Search paint names…" autocomplete="off" />
               <label class="visually-hidden" for="paint-brand-filter">Filter by paint brand</label>
@@ -320,7 +323,7 @@ app.innerHTML = `
                   </span>
                 `).join("")}
               </div>
-              <p class="setting-help">Automatic palette choice and region assignment use approximate RGB swatches and a simple two-paint mixing model; they are planning aids, not physical pigment predictions.</p>
+              <p class="setting-help">Automatic palette choice and region assignment use approximate RGB swatches and a simple mixing model; they are planning aids, not physical pigment predictions.</p>
             </div>
           </details>
 
@@ -363,7 +366,7 @@ app.innerHTML = `
           <ul>
             <li>In <strong>Watercolor palette</strong>, search or filter the catalog and tick the paints you own. Your inventory is saved in this browser. Tap a swatch to set your own display color.</li>
             <li>Tick <strong>Use</strong> on the paints for this painting, set a maximum, or tap <strong>Suggest limited palette</strong> to let the app choose.</li>
-            <li>Select a region, choose a paint and wash strength, then <strong>Fill selected</strong>. Or tap <strong>Auto-assign palette</strong> to match regions with single paints or two-paint mixes. Select a region to see its recipe.</li>
+            <li>Select a region, choose a paint and wash strength, then <strong>Fill selected</strong>. Or tap <strong>Auto-assign palette</strong> to match regions with up to three paints. Select a region to see its recipe.</li>
             <li><strong>Draw shape</strong> then <strong>Fill drawn shape</strong> paints a freehand area. Fills are layered, so later fills overlap earlier ones.</li>
           </ul>
           <h3>5 · Save your work</h3>
@@ -463,6 +466,7 @@ const paintResults = get<HTMLDivElement>("#paint-results");
 const paintResultsSummary = get<HTMLParagraphElement>("#paint-results-summary");
 const selectedPaintsElement = get<HTMLDivElement>("#selected-paints");
 const paletteCountOutput = get<HTMLOutputElement>("#palette-count");
+const paletteStorageWarning = get<HTMLParagraphElement>("#palette-storage-warning");
 const drawZoneButton = get<HTMLButtonElement>("#draw-zone");
 const zoneControls = get<HTMLDivElement>("#zone-controls");
 const zoneOverlay = get<HTMLCanvasElement>("#zone-overlay");
@@ -515,14 +519,21 @@ let paintingPalettePaintIds = new Set<string>();
 let paintingPaletteCustomized = false;
 const PALETTE_STORAGE_KEY = "watercolorist.selected-paints.v1";
 const PAINT_SWATCH_STORAGE_KEY = "watercolorist.paint-swatches.v1";
+const PAINTING_PALETTE_STORAGE_KEY = "watercolorist.painting-palette.v1";
 const paintIds = new Set(paintCatalog.map((paint) => paint.id));
+
+const warnPaletteStorage = (message: string) => {
+  paletteStorageWarning.textContent = message;
+  paletteStorageWarning.hidden = false;
+};
 
 const loadSelectedPaintIds = () => {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(PALETTE_STORAGE_KEY) ?? "[]");
-    if (!Array.isArray(stored)) return new Set<string>();
-    return new Set(stored.filter((id): id is string => typeof id === "string" && paintIds.has(id)));
+    if (!Array.isArray(stored) || !stored.every((id) => typeof id === "string")) throw new Error("Invalid paint inventory");
+    return new Set<string>(stored);
   } catch {
+    warnPaletteStorage("Your saved paint inventory could not be read. Browser storage may be unavailable or damaged; avoid clearing site data.");
     return new Set<string>();
   }
 };
@@ -533,6 +544,28 @@ const defaultPaintingPalette = () => {
   return new Set(owned.length <= Number(paintingPaletteLimitInput.value) ? owned.map((paint) => paint.id) : []);
 };
 paintingPalettePaintIds = defaultPaintingPalette();
+
+const loadPaintingPalette = () => {
+  try {
+    const raw = localStorage.getItem(PAINTING_PALETTE_STORAGE_KEY);
+    if (!raw) return;
+    const stored: unknown = JSON.parse(raw);
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+    const record = stored as { paintIds?: unknown; limit?: unknown; customized?: unknown };
+    if (!Array.isArray(record.paintIds) || !record.paintIds.every((id) => typeof id === "string") ||
+      !Number.isInteger(record.limit) || Number(record.limit) < 1 || Number(record.limit) > 20 ||
+      typeof record.customized !== "boolean") return;
+    paintingPaletteLimitInput.value = String(record.limit);
+    paintingPaletteCustomized = record.customized;
+    paintingPalettePaintIds = record.customized
+      ? new Set(record.paintIds.filter((id: string) => selectedPaintIds.has(id) && paintIds.has(id)).slice(0, Number(record.limit)))
+      : defaultPaintingPalette();
+  } catch {
+    // Keep the in-memory defaults if browser storage is unavailable.
+  }
+};
+
+loadPaintingPalette();
 
 const syncPaintingPaletteToInventory = () => {
   if (!paintingPaletteCustomized) {
@@ -545,9 +578,20 @@ const syncPaintingPaletteToInventory = () => {
 const activeStudy = () => studyHistory[studyIndex];
 
 const savePaintingPaletteOnStudy = (study: Study | undefined) => {
-  if (!study) return;
-  study.palettePaintIds = [...paintingPalettePaintIds];
-  study.paletteLimit = Number(paintingPaletteLimitInput.value);
+  if (study) {
+    study.palettePaintIds = [...paintingPalettePaintIds];
+    study.paletteLimit = Number(paintingPaletteLimitInput.value);
+  }
+  try {
+    localStorage.setItem(PAINTING_PALETTE_STORAGE_KEY, JSON.stringify({
+      paintIds: [...paintingPalettePaintIds],
+      limit: Number(paintingPaletteLimitInput.value),
+      customized: paintingPaletteCustomized,
+    }));
+  } catch {
+    warnPaletteStorage("The painting palette could not be saved in this browser.");
+    setStatus("The browser could not save the painting palette on this device.", "error");
+  }
 };
 
 const loadSelectedPaintSwatches = () => {
@@ -564,11 +608,19 @@ const loadSelectedPaintSwatches = () => {
 
 const selectedPaintSwatches = loadSelectedPaintSwatches();
 
-const saveSelectedPaintIds = () => {
+const changeSelectedPaintId = (id: string, selected: boolean) => {
   try {
+    const stored: unknown = JSON.parse(localStorage.getItem(PALETTE_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(stored) || !stored.every((value) => typeof value === "string")) throw new Error("Invalid saved inventory");
+    selectedPaintIds = new Set<string>(stored);
+    if (selected) selectedPaintIds.add(id);
+    else selectedPaintIds.delete(id);
     localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify([...selectedPaintIds]));
   } catch {
-    setStatus("The browser could not save this palette on this device.", "error");
+    if (selected) selectedPaintIds.add(id);
+    else selectedPaintIds.delete(id);
+    warnPaletteStorage("Your inventory could not be saved. Changes may be lost when this page closes; check browser storage settings.");
+    setStatus("Could not read or save your paint inventory; this change may not persist. Check browser storage settings.", "error");
   }
 };
 
@@ -685,28 +737,13 @@ const swatchRgb = (swatch: string) => {
   return channels && channels.length >= 3 ? channels.slice(0, 3) : undefined;
 };
 
-const mixPaintRgb = (first: number[], second: number[], firstPaintRatio: number) => first.map((channel, index) => {
-  const firstReflectance = Math.max(1, channel) / 255;
-  const secondReflectance = Math.max(1, second[index] ?? channel) / 255;
-  // Geometric reflectance interpolation is a simple subtractive-pigment approximation.
-  return Math.round(255 * firstReflectance ** firstPaintRatio * secondReflectance ** (1 - firstPaintRatio));
-});
-
-const bestWashMatch = (target: number[], pigmentColor: number[], valueShade = 1) => {
-  const paper = [246, 243, 233];
-  const shadedPaper = paper.map((channel) => channel * valueShade);
-  const delta = pigmentColor.map((channel, index) => (channel - paper[index]) * valueShade);
-  const targetDelta = target.map((channel, index) => channel - shadedPaper[index]);
-  const denominator = delta.reduce((sum, channel) => sum + channel * channel, 0) || 1;
-  const projectedStrength = targetDelta.reduce((sum, channel, index) => sum + channel * delta[index], 0) / denominator;
-  const strength = Math.max(0.05, Math.min(1, projectedStrength));
-  const predicted = shadedPaper.map((channel, index) => channel + delta[index] * strength);
-  const distance = predicted.reduce((sum, channel, index) => sum + (channel - target[index]) ** 2, 0);
-  return { strength, distance };
-};
+const layerComponents = (layer: RegionPaintLayer): PaintComponent[] => layer.components ?? (layer.secondPaintId
+  ? [{ paintId: layer.paintId, proportion: layer.mixRatio ?? 0.5 }, { paintId: layer.secondPaintId, proportion: 1 - (layer.mixRatio ?? 0.5) }]
+  : [{ paintId: layer.paintId, proportion: 1 }]);
 
 const updateRegionPaintChoices = () => {
   const selected = paintCatalog.filter((paint) => paintingPalettePaintIds.has(paint.id) && selectedPaintIds.has(paint.id));
+  const inventoryCount = paintCatalog.filter((paint) => selectedPaintIds.has(paint.id)).length;
   const previous = regionPaintChoice.value;
   regionPaintChoice.replaceChildren(new Option(selected.length ? "Choose a paint…" : "Select paints in palette…", ""));
   for (const paint of selected) {
@@ -716,10 +753,10 @@ const updateRegionPaintChoices = () => {
   regionPaintChoice.value = selected.some((paint) => paint.id === previous) ? previous : "";
   applyRegionPaintButton.disabled = selectedRegionIds.size === 0 || !regionPaintChoice.value;
   autoAssignPaintsButton.disabled = selected.length === 0 || !activeStudy()?.regionLabels;
-  autoSelectPaletteButton.disabled = selectedPaintIds.size === 0 || !activeStudy();
-  paintingPaletteSummary.textContent = selectedPaintIds.size > Number(paintingPaletteLimitInput.value) && paintingPalettePaintIds.size === 0
+  autoSelectPaletteButton.disabled = inventoryCount === 0 || !activeStudy();
+  paintingPaletteSummary.textContent = inventoryCount > Number(paintingPaletteLimitInput.value) && paintingPalettePaintIds.size === 0
     ? `Choose up to ${paintingPaletteLimitInput.value} paints with the “Use” checkboxes, or ask for a suggestion.`
-    : `${paintingPalettePaintIds.size} of ${selectedPaintIds.size} owned paints in this painting's palette.`;
+    : `${paintingPalettePaintIds.size} of ${inventoryCount} owned paints in this painting's palette.`;
 };
 
 const createPaintedStudyBlob = async (study: Study) => {
@@ -771,18 +808,14 @@ const renderPaintOverlay = (study: Study) => {
   sizeCanvas(regionColorOverlay, study.regionWidth, study.regionHeight);
   const image = context.createImageData(study.regionWidth, study.regionHeight);
   const layers = (study.paintLayers ?? []).flatMap((layer) => {
-    const paint = paintCatalog.find((entry) => entry.id === layer.paintId);
-    const swatch = paint ? paintDisplaySwatch(paint) : undefined;
-    if (!swatch || (!layer.regionIds?.length && !layer.shapes?.length)) return [];
-    const firstColor = swatchRgb(swatch);
-    const secondPaint = layer.secondPaintId
-      ? paintCatalog.find((entry) => entry.id === layer.secondPaintId)
-      : undefined;
-    const secondColor = secondPaint ? swatchRgb(paintDisplaySwatch(secondPaint) ?? "") : undefined;
-    if (!firstColor) return [];
-    const color = secondColor
-      ? mixPaintRgb(firstColor, secondColor, Math.max(0, Math.min(1, layer.mixRatio ?? 0.5)))
-      : firstColor;
+    if (!layer.regionIds?.length && !layer.shapes?.length) return [];
+    const components = layerComponents(layer);
+    const colors = components.map((component) => {
+      const paint = paintCatalog.find((entry) => entry.id === component.paintId);
+      return paint ? swatchRgb(paintDisplaySwatch(paint) ?? "") : undefined;
+    });
+    if (colors.some((color) => !color)) return [];
+    const color = mixColors(colors as number[][], components.map((component) => component.proportion));
     let shapeMask: Uint8ClampedArray | undefined;
     if (layer.shapes?.length) {
       const maskCanvas = document.createElement("canvas");
@@ -814,6 +847,18 @@ const renderPaintOverlay = (study: Study) => {
     return;
   }
 
+  const layersByRegion = new Map<number, typeof layers>();
+  const shapeLayers = layers.filter((layer) => layer.shapeMask);
+  for (const layer of layers) {
+    for (const regionId of layer.regionIds) {
+      let applicable = layersByRegion.get(regionId);
+      if (!applicable) {
+        applicable = [];
+        layersByRegion.set(regionId, applicable);
+      }
+      applicable.push(layer);
+    }
+  }
   // Cold-press paper is represented by a warm off-white base. The value-study luminance shades each wash.
   const paper = [246, 243, 233];
   for (let index = 0; index < study.regionLabels.length; index += 1) {
@@ -823,7 +868,8 @@ const renderPaintOverlay = (study: Study) => {
     let green = paper[1];
     let blue = paper[2];
     let painted = false;
-    for (const layer of layers) {
+    const applicableLayers = shapeLayers.length ? layers : layersByRegion.get(regionId) ?? [];
+    for (const layer of applicableLayers) {
       if (!layer.regionIds.has(regionId) && !(layer.shapeMask?.[index * 4 + 3])) continue;
       const { color, strength } = layer;
       red = red * (1 - strength) + color[0] * strength;
@@ -1025,66 +1071,50 @@ const autoAssignPalette = async () => {
     setStatus("Add at least one paint to this painting's palette before auto-assigning.", "error");
     return;
   }
+  const paletteSignature = JSON.stringify(palette);
+  const currentPaletteSignature = () => JSON.stringify(paintCatalog.flatMap((paint) => {
+    if (!paintingPalettePaintIds.has(paint.id) || !selectedPaintIds.has(paint.id)) return [];
+    const color = swatchRgb(paintDisplaySwatch(paint) ?? "");
+    return color ? [{ paintId: paint.id, color }] : [];
+  }));
+  autoAssignPaintsButton.disabled = true;
   try {
     const regions = await getStudyRegionColorSamples(study);
     if (study !== activeStudy()) return;
     const assignments = new Map<string, RegionPaintLayer & { regionIds: number[] }>();
+    const matches = new Map<string, ReturnType<typeof findPaintMatch>>();
     let mixedRegionCount = 0;
-    for (const sample of regions) {
+    let tripleRegionCount = 0;
+    for (const [index, sample] of regions.entries()) {
+      if (index > 0 && index % 20 === 0) {
+        setStatus(`Matching colors: ${index} of ${regions.length} regions…`);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (study !== activeStudy()) return;
+      }
       const { regionId, color: target, valueShade } = sample;
-      let closest: {
-        paintId: string;
-        secondPaintId?: string;
-        mixRatio?: number;
-        washStrength: number;
-        distance: number;
-      };
-      closest = { paintId: palette[0].paintId, washStrength: 65, distance: Number.POSITIVE_INFINITY };
-      for (const candidate of palette) {
-        const match = bestWashMatch(target, candidate.color, valueShade);
-        if (match.distance < closest.distance) {
-          closest = { paintId: candidate.paintId, washStrength: Math.round(match.strength * 20) * 5, distance: match.distance };
-        }
+      const matchKey = JSON.stringify([target, valueShade]);
+      let closest = matches.get(matchKey);
+      if (!closest) {
+        closest = findPaintMatch(target, palette, valueShade);
+        matches.set(matchKey, closest);
       }
-      const shortlist = [...palette]
-        .sort((first, second) => {
-          const firstDistance = first.color.reduce((sum, channel, index) => sum + (channel - target[index]) ** 2, 0);
-          const secondDistance = second.color.reduce((sum, channel, index) => sum + (channel - target[index]) ** 2, 0);
-          return firstDistance - secondDistance;
-        })
-        .slice(0, Math.min(18, palette.length));
-      for (let firstIndex = 0; firstIndex < shortlist.length; firstIndex += 1) {
-        for (let secondIndex = firstIndex + 1; secondIndex < shortlist.length; secondIndex += 1) {
-          const first = shortlist[firstIndex];
-          const second = shortlist[secondIndex];
-          for (let ratioStep = 1; ratioStep < 10; ratioStep += 1) {
-            const mixRatio = ratioStep / 10;
-            const color = mixPaintRgb(first.color, second.color, mixRatio);
-            const match = bestWashMatch(target, color, valueShade);
-            if (match.distance < closest.distance) {
-              closest = {
-                paintId: first.paintId,
-                secondPaintId: second.paintId,
-                mixRatio,
-                washStrength: Math.max(5, Math.min(100, Math.round(match.strength * 20) * 5)),
-                distance: match.distance,
-              };
-            }
-          }
-        }
-      }
-      const mixRatio = closest.mixRatio ?? 0;
-      const groupKey = [closest.paintId, closest.secondPaintId ?? "", mixRatio, closest.washStrength].join("|");
+      const components = [...closest.components].sort((a, b) => a.paintId.localeCompare(b.paintId));
+      const groupKey = JSON.stringify([components, closest.washStrength]);
       const group = assignments.get(groupKey) ?? {
         id: crypto.randomUUID(),
-        paintId: closest.paintId,
-        ...(closest.secondPaintId ? { secondPaintId: closest.secondPaintId, mixRatio: closest.mixRatio } : {}),
+        paintId: components[0].paintId,
+        components,
         washStrength: closest.washStrength,
         regionIds: [],
       };
       group.regionIds.push(regionId);
       assignments.set(groupKey, group);
-      if (closest.secondPaintId) mixedRegionCount += 1;
+      if (components.length > 1) mixedRegionCount += 1;
+      if (components.length === 3) tripleRegionCount += 1;
+    }
+    if (study !== activeStudy() || paletteSignature !== currentPaletteSignature()) {
+      setStatus("The painting or palette changed during matching; run auto-assign again.", "error");
+      return;
     }
     const shapeLayers = (study.paintLayers ?? []).filter((layer) => layer.shapes?.length);
     const assignedLayers = [...assignments.values()];
@@ -1094,11 +1124,13 @@ const autoAssignPalette = async () => {
     await updateStudyDownload(study);
     const regionCount = regions.length;
     const mixedSummary = mixedRegionCount === 0
-      ? "No regions needed a two-paint mix."
-      : `${mixedRegionCount} ${mixedRegionCount === 1 ? "region uses" : "regions use"} two-paint mixes.`;
+      ? "No regions needed a mix."
+      : `${mixedRegionCount} ${mixedRegionCount === 1 ? "region uses" : "regions use"} mixes, including ${tripleRegionCount} with three paints.`;
     setStatus(`Auto-matched ${regionCount} ${regionCount === 1 ? "region" : "regions"}. ${mixedSummary} Wash strengths were optimized on warm paper.`, "success");
   } catch (error) {
     setStatus(error instanceof Error ? `Could not auto-assign paints: ${error.message}` : "Could not auto-assign paints.", "error");
+  } finally {
+    updateRegionPaintChoices();
   }
 };
 
@@ -1411,9 +1443,7 @@ const setSelectedFile = (file: File) => {
   zoneDrawMode = false;
   activeZonePoints = [];
   renderZoneList();
-  paintingPaletteCustomized = false;
   syncPaintingPaletteToInventory();
-  renderPaintCatalog();
   selectedRegionIds.clear();
   selectedRegionSeeds.clear();
   pendingMergeRequest = undefined;
@@ -1432,6 +1462,7 @@ const setSelectedFile = (file: File) => {
   compositeDownloadUrl = undefined;
   studyHistory = [];
   studyIndex = -1;
+  renderPaintCatalog();
   snapshotRoot = undefined;
   promptSaveCheckbox.checked = false;
   autoAbstraction = true;
@@ -1472,6 +1503,14 @@ const updateHistoryControls = () => {
 const isTouchSelectionAvailable = () =>
   window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 
+const resizeResultStage = (study: Study) => {
+  if (!study.regionWidth || !study.regionHeight) return;
+  const aspect = study.regionWidth / study.regionHeight;
+  const width = `${Math.min(Math.max(1, resultCard.clientWidth - 2), 430 * aspect)}px`;
+  if (resultStage.style.width !== width) resultStage.style.width = width;
+  resultStage.style.aspectRatio = `${study.regionWidth} / ${study.regionHeight}`;
+};
+
 const renderStudy = (study: Study) => {
   resultPreview.src = study.url;
   resultStage.hidden = false;
@@ -1497,10 +1536,7 @@ const renderStudy = (study: Study) => {
   regionMultiSelectButton.setAttribute("aria-pressed", String(regionMultiSelectMode));
   regionOverlay.hidden = false;
   regionColorOverlay.hidden = false;
-  const aspect = study.regionWidth / study.regionHeight;
-  const maxWidth = Math.max(1, resultCard.clientWidth - 2);
-  resultStage.style.width = `${Math.min(maxWidth, 430 * aspect)}px`;
-  resultStage.style.aspectRatio = `${study.regionWidth} / ${study.regionHeight}`;
+  resizeResultStage(study);
   sizeCanvas(regionOverlay, study.regionWidth, study.regionHeight);
   sizeCanvas(regionColorOverlay, study.regionWidth, study.regionHeight);
   updateRegionPaintChoices();
@@ -1521,14 +1557,12 @@ const describeRegionPaint = (study: Study, regionId: number) => {
     }
   }
   if (!layer) return "";
-  const firstName = paintCatalog.find((paint) => paint.id === layer?.paintId)?.name ?? "Paint";
-  const secondName = layer.secondPaintId
-    ? paintCatalog.find((paint) => paint.id === layer?.secondPaintId)?.name
-    : undefined;
-  const ratio = layer.mixRatio ?? 0.5;
-  const recipe = secondName
-    ? `${firstName} ${Math.round(ratio * 100)}% + ${secondName} ${Math.round((1 - ratio) * 100)}%`
-    : firstName;
+  const components = layerComponents(layer);
+  const recipe = components.map((component) => {
+    const paint = paintCatalog.find((entry) => entry.id === component.paintId);
+    const name = paint ? `${paint.name} (${paint.brandName})` : component.paintId;
+    return components.length > 1 ? `${name} ${Math.round(component.proportion * 100)}%` : name;
+  }).join(" + ");
   return ` · ${recipe} · Wash ${layer.washStrength}%`;
 };
 
@@ -2086,16 +2120,18 @@ const normalizedCanvasPoint = (event: PointerEvent) => {
   };
 };
 
+let shapePointerId: number | undefined;
 regionOverlay.addEventListener("pointerdown", (event) => {
-  if (!drawShapeMode || !studyHistory[studyIndex]?.regionLabels) return;
+  if (!drawShapeMode || !studyHistory[studyIndex]?.regionLabels || shapePointerId !== undefined || !event.isPrimary) return;
   event.preventDefault();
+  shapePointerId = event.pointerId;
   regionOverlay.setPointerCapture(event.pointerId);
   activeShapePoints = [normalizedCanvasPoint(event)];
   scheduleRegionOverlay();
 });
 
 regionOverlay.addEventListener("pointermove", (event) => {
-  if (!drawShapeMode || !regionOverlay.hasPointerCapture(event.pointerId)) return;
+  if (!drawShapeMode || shapePointerId !== event.pointerId || !regionOverlay.hasPointerCapture(event.pointerId)) return;
   event.preventDefault();
   const point = normalizedCanvasPoint(event);
   const previous = activeShapePoints[activeShapePoints.length - 1];
@@ -2104,10 +2140,11 @@ regionOverlay.addEventListener("pointermove", (event) => {
 });
 
 const finishShapeStroke = (event: PointerEvent) => {
-  if (!regionOverlay.hasPointerCapture(event.pointerId)) return;
-  if (activeShapePoints.length >= 3) pendingShapes.push(activeShapePoints);
+  if (shapePointerId !== event.pointerId) return;
+  if (event.type === "pointerup" && activeShapePoints.length >= 3) pendingShapes.push(activeShapePoints);
   activeShapePoints = [];
-  regionOverlay.releasePointerCapture(event.pointerId);
+  shapePointerId = undefined;
+  if (regionOverlay.hasPointerCapture(event.pointerId)) regionOverlay.releasePointerCapture(event.pointerId);
   const study = studyHistory[studyIndex];
   if (study) renderRegionOverlay(study);
 };
@@ -2123,15 +2160,17 @@ const zonePoint = (event: PointerEvent) => {
   };
 };
 
+let zonePointerId: number | undefined;
 zoneOverlay.addEventListener("pointerdown", (event) => {
-  if (!zoneDrawMode) return;
+  if (!zoneDrawMode || zonePointerId !== undefined || !event.isPrimary) return;
   event.preventDefault();
+  zonePointerId = event.pointerId;
   zoneOverlay.setPointerCapture(event.pointerId);
   activeZonePoints = [zonePoint(event)];
   scheduleZoneOverlay();
 });
 zoneOverlay.addEventListener("pointermove", (event) => {
-  if (!zoneDrawMode || !zoneOverlay.hasPointerCapture(event.pointerId)) return;
+  if (!zoneDrawMode || zonePointerId !== event.pointerId || !zoneOverlay.hasPointerCapture(event.pointerId)) return;
   event.preventDefault();
   const point = zonePoint(event);
   const previous = activeZonePoints[activeZonePoints.length - 1];
@@ -2139,11 +2178,12 @@ zoneOverlay.addEventListener("pointermove", (event) => {
   scheduleZoneOverlay();
 });
 const finishZoneStroke = (event: PointerEvent) => {
-  if (!zoneOverlay.hasPointerCapture(event.pointerId)) return;
-  zoneOverlay.releasePointerCapture(event.pointerId);
+  if (zonePointerId !== event.pointerId) return;
+  zonePointerId = undefined;
+  if (zoneOverlay.hasPointerCapture(event.pointerId)) zoneOverlay.releasePointerCapture(event.pointerId);
   const points = activeZonePoints;
   activeZonePoints = [];
-  if (points.length >= 3) addZoneFromStroke(points);
+  if (event.type === "pointerup" && points.length >= 3) addZoneFromStroke(points);
   else renderZoneOverlay();
 };
 zoneOverlay.addEventListener("pointerup", finishZoneStroke);
@@ -2151,7 +2191,7 @@ zoneOverlay.addEventListener("pointercancel", finishZoneStroke);
 // The overlay sits inside the upload label, so a click would otherwise open the file picker.
 zoneOverlay.addEventListener("click", (event) => event.preventDefault());
 sourcePreview.addEventListener("load", renderZoneOverlay);
-new ResizeObserver(renderZoneOverlay).observe(uploadCard);
+new ResizeObserver(scheduleZoneOverlay).observe(uploadCard);
 
 const appendStudy = (study: Study, completionMessage: string) => {
   regionMergeUndo = undefined;
@@ -2179,7 +2219,12 @@ const undoRegionMerge = () => {
   selectedRegionIds.clear();
   selectedRegionSeeds.clear();
   studyIndex = previousIndex;
-  renderStudy(studyHistory[studyIndex]);
+  const study = studyHistory[studyIndex];
+  paintingPalettePaintIds = new Set(study.palettePaintIds.filter((id) => selectedPaintIds.has(id)));
+  paintingPaletteLimitInput.value = String(study.paletteLimit);
+  paintingPaletteCustomized = true;
+  renderPaintCatalog();
+  renderStudy(study);
   updateHistoryControls();
   updateRunButton();
   setStatus("Region combination undone. The combined study remains in history.", "success");
@@ -2394,12 +2439,23 @@ fileInput.addEventListener("change", () => {
 regionOverlay.addEventListener("click", selectRegionAt);
 paintSearchInput.addEventListener("input", renderPaintCatalog);
 paintBrandFilter.addEventListener("change", renderPaintCatalog);
+window.addEventListener("storage", (event) => {
+  if (event.key !== PALETTE_STORAGE_KEY && event.key !== null) return;
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(PALETTE_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(stored) || !stored.every((id) => typeof id === "string")) throw new Error("Invalid saved inventory");
+    selectedPaintIds = new Set<string>(stored);
+    syncPaintingPaletteToInventory();
+    savePaintingPaletteOnStudy(activeStudy());
+    renderPaintCatalog();
+  } catch {
+    setStatus("Could not read the updated paint inventory from browser storage.", "error");
+  }
+});
 paintResults.addEventListener("change", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement) || !target.dataset.paintId) return;
-  if (target.checked) selectedPaintIds.add(target.dataset.paintId);
-  else selectedPaintIds.delete(target.dataset.paintId);
-  saveSelectedPaintIds();
+  changeSelectedPaintId(target.dataset.paintId, target.checked);
   syncPaintingPaletteToInventory();
   savePaintingPaletteOnStudy(activeStudy());
   renderPaintCatalog();
@@ -2412,8 +2468,7 @@ paintResults.addEventListener("change", (event) => {
 selectedPaintsElement.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement) || !target.dataset.removePaintId) return;
-  selectedPaintIds.delete(target.dataset.removePaintId);
-  saveSelectedPaintIds();
+  changeSelectedPaintId(target.dataset.removePaintId, false);
   syncPaintingPaletteToInventory();
   savePaintingPaletteOnStudy(activeStudy());
   renderPaintCatalog();
@@ -2584,7 +2639,7 @@ new ResizeObserver(() => {
   regionResizeFrame = requestAnimationFrame(() => {
     regionResizeFrame = undefined;
     const study = studyHistory[studyIndex];
-    if (study?.regionLabels) renderStudy(study);
+    if (study?.regionLabels) resizeResultStage(study);
   });
 }).observe(resultCard);
 

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 ImageSource = Image.Image | str | Path
 
@@ -10,10 +10,10 @@ ImageSource = Image.Image | str | Path
 def load_rgb(source: ImageSource) -> Image.Image:
     """Load an image or normalize an existing image to an independent RGB copy."""
     if isinstance(source, Image.Image):
-        return source.convert("RGB")
+        return ImageOps.exif_transpose(source).convert("RGB")
 
     with Image.open(source) as image:
-        return image.convert("RGB")
+        return ImageOps.exif_transpose(image).convert("RGB")
 
 
 def save_image(image: Image.Image, destination: str | Path) -> None:

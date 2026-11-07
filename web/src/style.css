@@ -102,6 +102,7 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.45px; }
 .palette-panel summary output { margin-left: auto; color: #8b948b; font-size: 9px; font-weight: 500; }
 .palette-controls { display: grid; gap: 8px; padding: 10px; border-top: 1px solid #efeee8; }
 .palette-controls > .setting-help { margin: 0; }
+.palette-storage-warning { margin: 0; padding: 8px; border: 1px solid #e8c1ad; border-radius: 6px; background: #fff3ec; color: #85492f; font-size: 10px; line-height: 1.4; }
 .palette-controls input[type="search"], .palette-controls select { width: 100%; min-height: 36px; padding: 0 9px; border: 1px solid #e2e4dc; border-radius: 7px; background: #fffefa; color: #415047; font-size: 11px; }
 .palette-results-summary { margin: 0; color: #90978e; font-size: 9px; }
 .paint-results { display: grid; max-height: 224px; overflow-x: hidden; overflow-y: auto; border: 1px solid #e8e9e2; border-radius: 7px; background: #fffefa; overscroll-behavior: contain; }
